@@ -14,6 +14,11 @@ A Tower Defense mod for [Satisfactory](https://www.satisfactorygame.com/) — De
 - **Smart enemy AI** — Enemies analyze your base, find weak points, and prioritize targets
 - **Fully automated** — Turrets auto-target, drones auto-deliver, waves auto-trigger at night
 
+## Videos
+
+- [Gameplay — Night Wave Defense](https://www.youtube.com/watch?v=kFOYYFpG6xY)
+- [Turret Placement & Range Preview](https://www.youtube.com/watch?v=WtAJG7phTCw)
+
 ## Installation
 
 1. Install [Satisfactory Mod Manager (SMM)](https://smm.satisfactorymodding.com/)
