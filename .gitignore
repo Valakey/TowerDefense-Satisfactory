@@ -1,0 +1,20 @@
+# Build artifacts
+Binaries/
+Intermediate/
+Saved/
+
+# Content packages (too large for git, distributed via ficsit.app)
+Content/Paks/
+
+# Debug symbols
+*.pdb
+
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.sln.docstates
+
+# OS files
+Thumbs.db
+.DS_Store
