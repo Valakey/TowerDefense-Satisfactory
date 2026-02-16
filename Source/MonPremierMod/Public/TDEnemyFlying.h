@@ -123,15 +123,20 @@ private:
     float BobAmplitude = 30.0f;
     float BobFrequency = 2.0f;
 
-    // Detection de blocage
-    FVector LastStuckCheckPos = FVector::ZeroVector;
+    // Detection de blocage (simplifiee - plus de wall avoidance)
     float StuckTimer = 0.0f;
-    bool bIsStuck = false;
 
-    // Memoire de mur: quand on touche un mur, on se souvient de la normale
-    // et on contourne pendant WallAvoidTimer secondes
-    FVector WallAvoidNormal = FVector::ZeroVector;
-    float WallAvoidTimer = 0.0f;
+    // Hologramme: quand le volant traverse un objet, il devient transparent/holographique
+    UPROPERTY()
+    UMaterialInterface* HologramBaseMaterial = nullptr;
+    UPROPERTY()
+    UMaterialInstanceDynamic* HologramMaterial = nullptr;
+    bool bIsHologramActive = false;
+    float HologramTimer = 0.0f;
+    float HologramDuration = 0.5f; // Duree hologramme apres sortie d'un objet
+    float HologramScanTimer = 0.0f; // Throttle du scan fallback
+    int32 OriginalMaterialCount = 0;
+    TArray<UMaterialInterface*> OriginalMaterials; // Sauvegarder TOUS les materiaux originaux
 
 
     void FlyTowardsTarget(float DeltaTime);
@@ -150,4 +155,11 @@ private:
     UMaterialInterface* OriginalMaterial = nullptr;
     UPROPERTY()
     UMaterialInstanceDynamic* BlackMaterial = nullptr;
+    
+    // === PERF: cache spawner + throttle targeting ===
+    TWeakObjectPtr<AActor> CachedSpawner;
+    float TargetScanTimer = 0.0f;
+    float TargetScanInterval = 0.5f;  // Scan toutes les 0.5s au lieu de chaque frame
+    bool bBlinkState = false;
+    float BlinkTimer = 0.0f;
 };

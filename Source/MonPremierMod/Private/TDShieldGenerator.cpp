@@ -126,23 +126,7 @@ void ATDShieldGenerator::BeginPlay()
 void ATDShieldGenerator::Tick(float DeltaTime)
 {
     Super::Tick(DeltaTime);
-    // Visuals principalement geres dans Factory_Tick (toujours actif)
-    // Tick() sert de boost quand le joueur est proche (PrimaryActorTick actif)
-    if (bHasPower && CurrentChargedRings > 0)
-    {
-        float RotSpeed = 180.0f * DeltaTime * FMath::Max(1, CurrentChargedRings);
-        for (int32 i = 0; i < CurrentChargedRings && i < Rings.Num(); i++)
-        {
-            if (Rings[i] && Rings[i]->IsVisible())
-            {
-                FRotator R = Rings[i]->GetRelativeRotation();
-                R.Yaw += RotSpeed;
-                R.Pitch = FMath::Sin(GetWorld()->GetTimeSeconds() * (2.0f + i * 0.7f)) * 2.0f;
-                R.Roll = 90.0f + FMath::Sin(GetWorld()->GetTimeSeconds() * (3.0f + i * 0.5f)) * 1.5f;
-                Rings[i]->SetRelativeRotation(R);
-            }
-        }
-    }
+    // PERF: Ring rotation deja geree dans Factory_Tick - pas de doublon ici
 }
 
 void ATDShieldGenerator::Factory_Tick(float dt)

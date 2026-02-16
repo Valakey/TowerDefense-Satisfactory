@@ -31,7 +31,7 @@ ATDEnemyRam::ATDEnemyRam()
     VisibleMesh->SetRelativeScale3D(FVector(0.7f, 0.7f, 0.7f));
     VisibleMesh->SetRelativeRotation(FRotator(0.0f, 180.0f, 0.0f));
     VisibleMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-    VisibleMesh->SetCastShadow(true);
+    VisibleMesh->SetCastShadow(false);  // PERF: pas d'ombre par belier
 
     static ConstructorHelpers::FObjectFinder<UStaticMesh> RamMesh(TEXT("/MonPremierMod/Meshes/Ennemy/c_0155/C_0155.C_0155"));
     if (RamMesh.Succeeded())
@@ -152,35 +152,18 @@ void ATDEnemyRam::Tick(float DeltaTime)
 
     if (bIsDead || !GetWorld()) return;
 
-    // === ATTERRISSAGE: calculer chemin apres premier contact sol ===
+    // === ATTERRISSAGE: attendre le premier contact sol ===
     if (!bHasLanded)
     {
-        // Le Ram trace le sol chaque frame - on attend le premier trace reussi
         FHitResult LandCheck;
         FCollisionQueryParams LandParams;
         LandParams.AddIgnoredActor(this);
         FVector Loc = GetActorLocation();
         if (GetWorld()->LineTraceSingleByChannel(LandCheck, Loc + FVector(0,0,200), Loc - FVector(0,0,500), ECC_WorldStatic, LandParams))
         {
-            // Sol detecte sous nous - on est pose
             bHasLanded = true;
-            UE_LOG(LogTemp, Warning, TEXT("TDEnemyRam %s: ATTERRI a %s, demande chemin..."), *GetName(), *Loc.ToString());
-            
-            if (TargetBuilding && IsValid(TargetBuilding))
-            {
-                ATDCreatureSpawner* Spawner = nullptr;
-                for (TActorIterator<ATDCreatureSpawner> SpIt(GetWorld()); SpIt; ++SpIt) { Spawner = *SpIt; break; }
-                if (Spawner)
-                {
-                    TArray<FVector> Path = Spawner->GetGroundPathFor(Loc, TargetBuilding->GetActorLocation());
-                    if (Path.Num() > 0)
-                    {
-                        Waypoints = Path;
-                        CurrentWaypointIndex = 0;
-                        UE_LOG(LogTemp, Warning, TEXT("  -> %d waypoints recus"), Path.Num());
-                    }
-                }
-            }
+            UE_LOG(LogTemp, Warning, TEXT("TDEnemyRam %s: ATTERRI a %s (flow field mode)"), *GetName(), *Loc.ToString());
+            // Plus besoin de BFS ici: le flow field sera query dans UpdateRoaming/Approaching
         }
     }
 
@@ -224,18 +207,13 @@ void ATDEnemyRam::Tick(float DeltaTime)
     {
         FVector Loc = GetActorLocation();
         
-        // Ground trace pour trouver le sol (ignorer les ennemis)
+        // Ground trace pour trouver le sol
+        // ECC_WorldStatic ignore deja les Pawns (ECC_Pawn) -> pas besoin de boucle AddIgnoredActor
         FHitResult GroundHit;
         FVector TraceStart = Loc + FVector(0, 0, 200.0f);
         FVector TraceEnd = Loc - FVector(0, 0, 2000.0f);
         FCollisionQueryParams TraceParams;
         TraceParams.AddIgnoredActor(this);
-        TraceParams.bIgnoreBlocks = false;
-        // Ignorer tous les Pawns (ennemis au sol, volants, rams)
-        for (TActorIterator<APawn> PIt(GetWorld()); PIt; ++PIt)
-        {
-            TraceParams.AddIgnoredActor(*PIt);
-        }
         
         if (GetWorld()->LineTraceSingleByChannel(GroundHit, TraceStart, TraceEnd, ECC_WorldStatic, TraceParams))
         {
@@ -261,24 +239,23 @@ void ATDEnemyRam::Tick(float DeltaTime)
         PrimaryTarget = nullptr;
     }
     
-    // Invalider les cibles marquees comme detruites (structures)
+    // === PERF: Cache spawner une seule fois (au lieu de GetAllActorsOfClass chaque frame) ===
+    if (!CachedSpawnerPtr.IsValid())
     {
-        TArray<AActor*> Spawners;
-        UGameplayStatics::GetAllActorsOfClass(GetWorld(), ATDCreatureSpawner::StaticClass(), Spawners);
-        if (Spawners.Num() > 0)
+        for (TActorIterator<ATDCreatureSpawner> SpIt(GetWorld()); SpIt; ++SpIt) { CachedSpawnerPtr = *SpIt; break; }
+    }
+    ATDCreatureSpawner* CachedSpawner = Cast<ATDCreatureSpawner>(CachedSpawnerPtr.Get());
+    
+    // Invalider les cibles marquees comme detruites (structures)
+    if (CachedSpawner)
+    {
+        if (TargetBuilding && CachedSpawner->IsBuildingDestroyed(TargetBuilding))
         {
-            ATDCreatureSpawner* Spawner = Cast<ATDCreatureSpawner>(Spawners[0]);
-            if (Spawner)
-            {
-                if (TargetBuilding && Spawner->IsBuildingDestroyed(TargetBuilding))
-                {
-                    TargetBuilding = nullptr;
-                }
-                if (PrimaryTarget && Spawner->IsBuildingDestroyed(PrimaryTarget))
-                {
-                    PrimaryTarget = nullptr;
-                }
-            }
+            TargetBuilding = nullptr;
+        }
+        if (PrimaryTarget && CachedSpawner->IsBuildingDestroyed(PrimaryTarget))
+        {
+            PrimaryTarget = nullptr;
         }
     }
 
@@ -309,6 +286,8 @@ void ATDEnemyRam::Tick(float DeltaTime)
 // === ROAMING: cherche un batiment dans 50m ===
 void ATDEnemyRam::UpdateRoaming(float DeltaTime)
 {
+    ATDCreatureSpawner* CachedSpawner = Cast<ATDCreatureSpawner>(CachedSpawnerPtr.Get());
+    
     // Si on etait en mode wall-breaking et le mur est detruit -> retour a la cible prio
     if (bIsBreakingWall && (!TargetBuilding || !IsValid(TargetBuilding)))
     {
@@ -330,24 +309,16 @@ void ATDEnemyRam::UpdateRoaming(float DeltaTime)
 
         // Consulter le Base Analyzer global (pre-calcule une fois par vague)
         AActor* BlockingWall = nullptr;
+        if (CachedSpawner)
         {
-            for (TActorIterator<ATDCreatureSpawner> It(GetWorld()); It; ++It)
+            FAttackPath Path = CachedSpawner->GetBestAttackPath(GetActorLocation(), false);
+            if (Path.Target && IsValid(Path.Target))
             {
-                ATDCreatureSpawner* Spawner = *It;
-                if (!Spawner) continue;
-                
-                FAttackPath Path = Spawner->GetBestAttackPath(GetActorLocation(), false);
-                if (Path.Target && IsValid(Path.Target))
+                Building = Path.Target;
+                if (Path.bIsEnclosed && Path.WallToBreak && IsValid(Path.WallToBreak))
                 {
-                    // Utiliser la cible du plan global
-                    Building = Path.Target;
-                    
-                    if (Path.bIsEnclosed && Path.WallToBreak && IsValid(Path.WallToBreak))
-                    {
-                        BlockingWall = Path.WallToBreak;
-                    }
+                    BlockingWall = Path.WallToBreak;
                 }
-                break;
             }
         }
 
@@ -378,28 +349,28 @@ void ATDEnemyRam::UpdateRoaming(float DeltaTime)
         return;
     }
 
-    // Pas de cible proche: suivre les waypoints ou aller vers la cible assignee
+    // Pas de cible proche: utiliser le flow field pour se deplacer vers la cible
     if (TargetBuilding && IsValid(TargetBuilding))
     {
         FVector MyLoc = GetActorLocation();
-        FVector MoveTarget;
+        FVector Direction;
         
-        // Suivre les waypoints pre-calcules si disponibles
-        if (CurrentWaypointIndex < Waypoints.Num())
+        // === FLOW FIELD: lookup O(1) (utilise CachedSpawner du Tick) ===
+        FVector FlowDir = FVector::ZeroVector;
+        if (CachedSpawner)
         {
-            FVector WP = Waypoints[CurrentWaypointIndex];
-            if (FVector::Dist2D(MyLoc, WP) < 250.0f)
-            {
-                CurrentWaypointIndex++;
-            }
-            MoveTarget = (CurrentWaypointIndex < Waypoints.Num()) ? Waypoints[CurrentWaypointIndex] : TargetBuilding->GetActorLocation();
+            FlowDir = CachedSpawner->QueryGroundFlow(MyLoc, TargetBuilding);
+        }
+        
+        if (!FlowDir.IsNearlyZero())
+        {
+            Direction = FlowDir;
         }
         else
         {
-            MoveTarget = TargetBuilding->GetActorLocation();
+            // Fallback direct vers la cible
+            Direction = (TargetBuilding->GetActorLocation() - MyLoc).GetSafeNormal2D();
         }
-        
-        FVector Direction = (MoveTarget - MyLoc).GetSafeNormal2D();
 
         FVector NewLoc = MyLoc + Direction * MoveSpeed * SpeedMultiplier * DeltaTime;
         NewLoc.Z = MyLoc.Z;
@@ -501,11 +472,6 @@ void ATDEnemyRam::UpdatePreparing(float DeltaTime)
         FHitResult LOSHit;
         FCollisionQueryParams LOSParams;
         LOSParams.AddIgnoredActor(this);
-        // Ignorer les Pawns
-        for (TActorIterator<APawn> PIt(GetWorld()); PIt; ++PIt)
-        {
-            LOSParams.AddIgnoredActor(*PIt);
-        }
         
         FVector RayStart = MyLoc + FVector(0, 0, 30.0f);
         FVector RayEnd = TargetLoc + FVector(0, 0, 30.0f);
@@ -557,6 +523,7 @@ void ATDEnemyRam::UpdatePreparing(float DeltaTime)
 // === CHARGING: fonce vers la cible a grande vitesse ===
 void ATDEnemyRam::UpdateCharging(float DeltaTime)
 {
+    ATDCreatureSpawner* CachedSpawner = Cast<ATDCreatureSpawner>(CachedSpawnerPtr.Get());
     // Verifier que la cible existe toujours PENDANT la charge
     if (TargetBuilding && !IsValid(TargetBuilding))
     {
@@ -594,10 +561,6 @@ void ATDEnemyRam::UpdateCharging(float DeltaTime)
     FVector CTraceEnd = NewLoc - FVector(0, 0, 2000.0f);
     FCollisionQueryParams CTraceParams;
     CTraceParams.AddIgnoredActor(this);
-    for (TActorIterator<APawn> PIt(GetWorld()); PIt; ++PIt)
-    {
-        CTraceParams.AddIgnoredActor(*PIt);
-    }
     if (GetWorld()->LineTraceSingleByChannel(ChargeGroundHit, CTraceStart, CTraceEnd, ECC_WorldStatic, CTraceParams))
     {
         BaseHeight = ChargeGroundHit.ImpactPoint.Z + 50.0f;
@@ -614,11 +577,6 @@ void ATDEnemyRam::UpdateCharging(float DeltaTime)
         FVector RayEnd = NewLoc + ChargeDirection * 100.0f + FVector(0, 0, 30.0f);
         FCollisionQueryParams WallTraceParams;
         WallTraceParams.AddIgnoredActor(this);
-        // Ignorer les Pawns (ennemis)
-        for (TActorIterator<APawn> PIt(GetWorld()); PIt; ++PIt)
-        {
-            WallTraceParams.AddIgnoredActor(*PIt);
-        }
         
         if (GetWorld()->LineTraceSingleByChannel(WallHit, RayStart, RayEnd, ECC_WorldStatic, WallTraceParams))
         {
@@ -630,17 +588,12 @@ void ATDEnemyRam::UpdateCharging(float DeltaTime)
                 // STRICT: seulement Build_* et TD* (pas terrain/rochers/falaises)
                 if (WallClass.StartsWith(TEXT("Build_")) || bIsWallTD)
                 {
-                    // Infliger degats au mur
+                    // Infliger degats au mur (via CachedSpawner)
                     float FinalDamage = ChargeDamage * (SpeedMultiplier < 1.0f ? (1.0f - SlowDamageReduction) : 1.0f);
-                    for (TActorIterator<ATDCreatureSpawner> SpIt(GetWorld()); SpIt; ++SpIt)
+                    if (CachedSpawner)
                     {
-                        ATDCreatureSpawner* Spawner = *SpIt;
-                        if (Spawner)
-                        {
-                            Spawner->DamageBuilding(WallActor, FinalDamage);
-                            Spawner->MarkBuildingAttacked(WallActor);
-                            break;
-                        }
+                        CachedSpawner->DamageBuilding(WallActor, FinalDamage);
+                        CachedSpawner->MarkBuildingAttacked(WallActor);
                     }
                     NoAttackTimer = 0.0f;
                     
@@ -675,20 +628,21 @@ void ATDEnemyRam::UpdateCharging(float DeltaTime)
         }
     }
 
-    // Aussi verifier collision avec n'importe quel batiment sur le chemin
+    // Verifier collision avec batiments sur le chemin via sphere overlap (au lieu de TActorIterator<AActor>)
     if (!bHitTarget)
     {
-        for (TActorIterator<AActor> It(GetWorld()); It; ++It)
+        TArray<FOverlapResult> ChargeOverlaps;
+        FCollisionQueryParams ChargeOvParams;
+        ChargeOvParams.AddIgnoredActor(this);
+        if (GetWorld()->OverlapMultiByChannel(ChargeOverlaps, NewLoc, FQuat::Identity, ECC_WorldStatic, FCollisionShape::MakeSphere(300.0f), ChargeOvParams))
         {
-            AActor* Actor = *It;
-            if (!Actor || !IsValid(Actor) || Actor == this) continue;
-
-            FString ClassName = Actor->GetClass()->GetName();
-            bool bIsTDB = ClassName.StartsWith(TEXT("TD")) && !ClassName.StartsWith(TEXT("TDEnemy")) && !ClassName.StartsWith(TEXT("TDCreature")) && !ClassName.StartsWith(TEXT("TDWorld")) && !ClassName.StartsWith(TEXT("TDDropship"));
-            if (ClassName.StartsWith(TEXT("Build_")) || bIsTDB)
+            for (const FOverlapResult& Ov : ChargeOverlaps)
             {
-                float Dist = FVector::Dist2D(NewLoc, Actor->GetActorLocation());
-                if (Dist < 300.0f)
+                AActor* Actor = Ov.GetActor();
+                if (!Actor || !IsValid(Actor)) continue;
+                FString ClassName = Actor->GetClass()->GetName();
+                bool bIsTDB = ClassName.StartsWith(TEXT("TD")) && !ClassName.StartsWith(TEXT("TDEnemy")) && !ClassName.StartsWith(TEXT("TDCreature")) && !ClassName.StartsWith(TEXT("TDWorld")) && !ClassName.StartsWith(TEXT("TDDropship"));
+                if (ClassName.StartsWith(TEXT("Build_")) || bIsTDB)
                 {
                     bHitTarget = true;
                     HitBuilding = Actor;
@@ -716,16 +670,11 @@ void ATDEnemyRam::UpdateCharging(float DeltaTime)
             NoAttackTimer = 0.0f;
         }
 
-        // Infliger les degats via le spawner
-        for (TActorIterator<ATDCreatureSpawner> It(GetWorld()); It; ++It)
+        // Infliger les degats via le spawner (cache)
+        if (CachedSpawner)
         {
-            ATDCreatureSpawner* Spawner = *It;
-            if (Spawner)
-            {
-                Spawner->DamageBuilding(HitBuilding, FinalDamage);
-                Spawner->MarkBuildingAttacked(HitBuilding);
-                break;
-            }
+            CachedSpawner->DamageBuilding(HitBuilding, FinalDamage);
+            CachedSpawner->MarkBuildingAttacked(HitBuilding);
         }
 
         // Desactiver propulseur
@@ -839,13 +788,8 @@ AActor* ATDEnemyRam::FindBuildingInRange()
 {
     if (!GetWorld()) return nullptr;
     
-    // Obtenir le spawner pour verifier les batiments detruits
-    ATDCreatureSpawner* Spawner = nullptr;
-    for (TActorIterator<ATDCreatureSpawner> SpIt(GetWorld()); SpIt; ++SpIt)
-    {
-        Spawner = *SpIt;
-        break;
-    }
+    // Utiliser le spawner cache (pas de TActorIterator a chaque appel)
+    ATDCreatureSpawner* Spawner = Cast<ATDCreatureSpawner>(CachedSpawnerPtr.Get());
     
     FVector MyLoc = GetActorLocation();
     AActor* BestTurret = nullptr;    float BestTurretDist = DetectionRange;
@@ -873,19 +817,13 @@ AActor* ATDEnemyRam::FindBuildingInRange()
         bool bIsTDBuilding = ClassName.StartsWith(TEXT("TD")) && !ClassName.StartsWith(TEXT("TDEnemy")) && !ClassName.StartsWith(TEXT("TDCreature")) && !ClassName.StartsWith(TEXT("TDWorld")) && !ClassName.StartsWith(TEXT("TDDropship"));
         if (!ClassName.StartsWith(TEXT("Build_")) && !bIsTDBuilding) continue;
 
-        // Ignorer transport/infrastructure
-        if (ClassName.Contains(TEXT("ConveyorBelt")) || ClassName.Contains(TEXT("ConveyorLift")) ||
-            ClassName.Contains(TEXT("ConveyorAttachment")) ||
-            ClassName.Contains(TEXT("PowerLine")) || ClassName.Contains(TEXT("Wire")) ||
-            ClassName.Contains(TEXT("PowerPole")) || ClassName.Contains(TEXT("PowerTower")) ||
-            ClassName.Contains(TEXT("RailroadTrack")) || ClassName.Contains(TEXT("PillarBase")) ||
-            ClassName.Contains(TEXT("Beam")) || ClassName.Contains(TEXT("Stair")) ||
-            ClassName.Contains(TEXT("Pipeline")) || ClassName.Contains(TEXT("Pipe")))
+        // Ignorer poutres et escaliers (non-destructibles)
+        if (ClassName.Contains(TEXT("Beam")) || ClassName.Contains(TEXT("Stair")))
             continue;
         
         // Ignorer objets non-attaquables et decoratifs
         if (ClassName.Contains(TEXT("SpaceElevator")) || ClassName.Contains(TEXT("Ladder")) ||
-            ClassName.Contains(TEXT("ConveyorPole")) || ClassName.Contains(TEXT("Walkway")) ||
+            ClassName.Contains(TEXT("Walkway")) ||
             ClassName.Contains(TEXT("Catwalk")) || ClassName.Contains(TEXT("Sign")) ||
             ClassName.Contains(TEXT("Light")) || ClassName.Contains(TEXT("HubTerminal")) ||
             ClassName.Contains(TEXT("WorkBench")) || ClassName.Contains(TEXT("TradingPost")) ||
@@ -941,7 +879,7 @@ void ATDEnemyRam::TakeDamageCustom(float DamageAmount)
 {
     if (bIsDead) return;
     Health -= DamageAmount;
-    UE_LOG(LogTemp, Warning, TEXT("TDEnemyRam %s: -%.0f HP (reste %.0f/%.0f)"), *GetName(), DamageAmount, Health, MaxHealth);
+    UE_LOG(LogTemp, Verbose, TEXT("TDEnemyRam %s: -%.0f HP (reste %.0f/%.0f)"), *GetName(), DamageAmount, Health, MaxHealth);
     if (Health <= 0.0f) Die();
 }
 

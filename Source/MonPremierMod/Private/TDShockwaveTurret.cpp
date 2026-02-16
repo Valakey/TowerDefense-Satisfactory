@@ -1,6 +1,7 @@
 #include "TDShockwaveTurret.h"
 #include "TDEnemy.h"
 #include "TDEnemyFlying.h"
+#include "TDEnemyRam.h"
 #include "Kismet/GameplayStatics.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -140,8 +141,15 @@ void ATDShockwaveTurret::Tick(float DeltaTime)
     {
     case EHammerState::Idle:
     {
+        // PERF: Throttle enemy scan toutes les 0.5s
+        EnemyScanTimer += DeltaTime;
+        if (EnemyScanTimer >= 0.5f)
+        {
+            EnemyScanTimer = 0.0f;
+            bCachedEnemiesInRange = HasEnemiesInRange();
+        }
         // Attendre qu'il y ait des ennemis a proximite
-        if (HasEnemiesInRange())
+        if (bCachedEnemiesInRange)
         {
             IdleTimer += DeltaTime;
             if (IdleTimer >= IdleCooldown)
@@ -158,7 +166,7 @@ void ATDShockwaveTurret::Tick(float DeltaTime)
                     DropAudioComponent->Play();
                 }
 
-                UE_LOG(LogTemp, Warning, TEXT("TDShockwaveTurret: DROPPING hammer!"));
+                UE_LOG(LogTemp, Verbose, TEXT("TDShockwaveTurret: DROPPING hammer!"));
             }
         }
         else
@@ -192,7 +200,7 @@ void ATDShockwaveTurret::Tick(float DeltaTime)
                 ImpactAudioComponent->Play();
             }
 
-            UE_LOG(LogTemp, Warning, TEXT("TDShockwaveTurret: IMPACT! Shockwave applied!"));
+            UE_LOG(LogTemp, Verbose, TEXT("TDShockwaveTurret: IMPACT! Shockwave applied!"));
 
             // Passer directement a la remontee
             HammerState = EHammerState::Rising;
@@ -231,7 +239,7 @@ void ATDShockwaveTurret::Tick(float DeltaTime)
                 RisingAudioComponent->Stop();
             }
 
-            UE_LOG(LogTemp, Warning, TEXT("TDShockwaveTurret: Hammer back to TOP, ready!"));
+            UE_LOG(LogTemp, Verbose, TEXT("TDShockwaveTurret: Hammer back to TOP, ready!"));
         }
         break;
     }
@@ -268,6 +276,20 @@ bool ATDShockwaveTurret::HasEnemiesInRange()
     for (TActorIterator<ATDEnemyFlying> It(GetWorld()); It; ++It)
     {
         ATDEnemyFlying* Enemy = *It;
+        if (Enemy && !Enemy->bIsDead)
+        {
+            float Dist = FVector::Dist(MyLoc, Enemy->GetActorLocation());
+            if (Dist <= ShockwaveRadius)
+            {
+                return true;
+            }
+        }
+    }
+
+    // Verifier beliers
+    for (TActorIterator<ATDEnemyRam> It(GetWorld()); It; ++It)
+    {
+        ATDEnemyRam* Enemy = *It;
         if (Enemy && !Enemy->bIsDead)
         {
             float Dist = FVector::Dist(MyLoc, Enemy->GetActorLocation());
@@ -316,7 +338,22 @@ void ATDShockwaveTurret::ApplyShockwave()
         }
     }
 
-    UE_LOG(LogTemp, Warning, TEXT("TDShockwaveTurret: Shockwave hit %d enemies! (radius=%.0f, slow=%.0fx for %.1fs)"), SlowedCount, ShockwaveRadius, SlowFactor, SlowDuration);
+    // Slow beliers
+    for (TActorIterator<ATDEnemyRam> It(GetWorld()); It; ++It)
+    {
+        ATDEnemyRam* Enemy = *It;
+        if (Enemy && !Enemy->bIsDead)
+        {
+            float Dist = FVector::Dist(MyLoc, Enemy->GetActorLocation());
+            if (Dist <= ShockwaveRadius)
+            {
+                Enemy->ApplySlow(SlowDuration, SlowFactor);
+                SlowedCount++;
+            }
+        }
+    }
+
+    UE_LOG(LogTemp, Verbose, TEXT("TDShockwaveTurret: Shockwave hit %d enemies! (radius=%.0f, slow=%.0fx for %.1fs)"), SlowedCount, ShockwaveRadius, SlowFactor, SlowDuration);
 }
 
 void ATDShockwaveTurret::UpdateHammerPosition()

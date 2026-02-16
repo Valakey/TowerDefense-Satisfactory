@@ -1,6 +1,7 @@
 #include "TDTurret.h"
 #include "TDEnemy.h"
 #include "TDEnemyFlying.h"
+#include "TDEnemyRam.h"
 #include "Kismet/GameplayStatics.h"
 #include "Engine/World.h"
 #include "DrawDebugHelpers.h"
@@ -203,17 +204,12 @@ void ATDTurret::Tick(float DeltaTime)
     // Verifier l'electricite
     CheckPowerStatus();
 
-    // Debug log toutes les 2 secondes
-    static float DebugTimer = 0.0f;
-    DebugTimer += DeltaTime;
-    if (DebugTimer > 2.0f)
+    // Debug log reduit (Verbose au lieu de Warning, pas de static partage)
+    DebugLogTimer += DeltaTime;
+    if (DebugLogTimer > 5.0f)
     {
-        DebugTimer = 0.0f;
-        FRotator HeadRot = HeadPivot ? HeadPivot->GetRelativeRotation() : FRotator::ZeroRotator;
-        UE_LOG(LogTemp, Warning, TEXT("TDTurret %s: bHasPower=%d | HeadPitch=%.1f HeadYaw=%.1f | PowerInfo=%d PowerConn=%d"),
-            *GetName(), bHasPower, HeadRot.Pitch, HeadRot.Yaw,
-            PowerInfo ? PowerInfo->HasPower() : -1,
-            PowerConnection ? PowerConnection->HasPower() : -1);
+        DebugLogTimer = 0.0f;
+        UE_LOG(LogTemp, Verbose, TEXT("TDTurret %s: bHasPower=%d"), *GetName(), bHasPower);
     }
 
     if (!bHasPower)
@@ -237,10 +233,15 @@ void ATDTurret::Tick(float DeltaTime)
     // Sauvegarder cible precedente pour detecter changement
     AActor* PreviousTarget = CurrentTarget;
     
+    // PERF: Throttle target scan toutes les 0.3s (au lieu de chaque frame)
+    TargetScanTimer += DeltaTime;
+    bool bDoScan = (TargetScanTimer >= TargetScanInterval);
+    if (bDoScan) TargetScanTimer = 0.0f;
+    
     // Chercher une cible si on n'en a pas ou si elle est morte/hors portee
     if (!CurrentTarget || !IsValid(CurrentTarget))
     {
-        CurrentTarget = FindBestTarget();
+        if (bDoScan) CurrentTarget = FindBestTarget();
     }
     else
     {
@@ -248,7 +249,8 @@ void ATDTurret::Tick(float DeltaTime)
         float DistanceToTarget = FVector::Dist(GetActorLocation(), CurrentTarget->GetActorLocation());
         if (DistanceToTarget > Range || IsEnemyDead(CurrentTarget))
         {
-            CurrentTarget = FindBestTarget();
+            if (bDoScan) CurrentTarget = FindBestTarget();
+            else CurrentTarget = nullptr; // Invalider immediatement
         }
     }
     
@@ -382,6 +384,12 @@ AActor* ATDTurret::FindBestTarget()
         TryCandidate(*It);
     }
     
+    // Chercher les beliers
+    for (TActorIterator<ATDEnemyRam> It(GetWorld()); It; ++It)
+    {
+        TryCandidate(*It);
+    }
+    
     return BestTarget;
 }
 
@@ -393,6 +401,8 @@ bool ATDTurret::IsEnemyDead(AActor* Enemy)
         return Ground->bIsDead;
     if (ATDEnemyFlying* Flying = Cast<ATDEnemyFlying>(Enemy))
         return Flying->bIsDead;
+    if (ATDEnemyRam* Ram = Cast<ATDEnemyRam>(Enemy))
+        return Ram->bIsDead;
     
     return true;
 }
@@ -408,6 +418,10 @@ void ATDTurret::DealDamageToEnemy(AActor* Enemy, float DmgAmount)
     else if (ATDEnemyFlying* Flying = Cast<ATDEnemyFlying>(Enemy))
     {
         Flying->TakeDamageCustom(DmgAmount);
+    }
+    else if (ATDEnemyRam* Ram = Cast<ATDEnemyRam>(Enemy))
+    {
+        Ram->TakeDamageCustom(DmgAmount);
     }
 }
 
@@ -553,14 +567,7 @@ void ATDTurret::UpdateLaserVisual()
     }
     bLaserActive = true;
     
-    // Spawn particules d'impact sur la cible
-    if (ImpactParticle)
-    {
-        UGameplayStatics::SpawnEmitterAtLocation(GetWorld(), ImpactParticle, End, FRotator::ZeroRotator, FVector(0.5f), true);
-    }
-    
-    // Debug: dessiner une ligne rouge
-    DrawDebugLine(GetWorld(), Start, End, FColor::Red, false, 0.0f, 0, 2.0f);
+    // Impact particles et debug line supprimes (SpawnEmitter chaque frame = tres couteux)
 }
 
 void ATDTurret::StopLaser()

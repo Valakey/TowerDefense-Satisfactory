@@ -174,4 +174,7 @@ protected:
     void Die();
 
     AActor* FindBuildingInRange();
+    
+    // === PERF: Cache spawner ===
+    TWeakObjectPtr<AActor> CachedSpawnerPtr;
 };

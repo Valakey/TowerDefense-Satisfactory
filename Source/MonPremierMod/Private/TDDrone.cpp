@@ -84,7 +84,7 @@ void ATDDrone::Tick(float DeltaTime)
                     if (CarriedAmmo > 0)
                     {
                         DroneState = EDroneState::FlyingToTurret;
-                        UE_LOG(LogTemp, Warning, TEXT("TDDrone: Flying to turret %s with %d ammo"), *TargetTurret->GetName(), CarriedAmmo);
+                        UE_LOG(LogTemp, Verbose, TEXT("TDDrone: Flying to turret %s with %d ammo"), *TargetTurret->GetName(), CarriedAmmo);
                     }
                 }
             }
@@ -111,7 +111,7 @@ void ATDDrone::Tick(float DeltaTime)
             // Arrive a la tourelle
             DroneState = EDroneState::Delivering;
             DeliverTimer = 0.0f;
-            UE_LOG(LogTemp, Warning, TEXT("TDDrone: Arrived at turret, delivering..."));
+            UE_LOG(LogTemp, Verbose, TEXT("TDDrone: Arrived at turret, delivering..."));
         }
         break;
     }
@@ -138,7 +138,7 @@ void ATDDrone::Tick(float DeltaTime)
             if (TargetTurret && IsValid(TargetTurret) && CarriedAmmo > 0)
             {
                 TargetTurret->Reload(CarriedAmmo);
-                UE_LOG(LogTemp, Warning, TEXT("TDDrone: Delivered %d ammo to turret %s"), CarriedAmmo, *TargetTurret->GetName());
+                UE_LOG(LogTemp, Verbose, TEXT("TDDrone: Delivered %d ammo to turret %s"), CarriedAmmo, *TargetTurret->GetName());
                 CarriedAmmo = 0;
             }
 
@@ -164,7 +164,7 @@ void ATDDrone::Tick(float DeltaTime)
             DroneState = EDroneState::Idle;
             ScanTimer = 0.0f;
             IdleBobTimer = 0.0f;
-            UE_LOG(LogTemp, Warning, TEXT("TDDrone: Returned to platform"));
+            UE_LOG(LogTemp, Verbose, TEXT("TDDrone: Returned to platform"));
         }
         break;
     }
@@ -233,5 +233,5 @@ void ATDDrone::PickupAmmoFromPlatform()
     // Prendre le maximum possible de la platform
     CarriedAmmo = OwnerPlatform->TakeAmmo(AmmoNeeded);
 
-    UE_LOG(LogTemp, Warning, TEXT("TDDrone: Picked up %d ammo from platform (turret needs %d)"), CarriedAmmo, AmmoNeeded);
+    UE_LOG(LogTemp, Verbose, TEXT("TDDrone: Picked up %d ammo from platform (turret needs %d)"), CarriedAmmo, AmmoNeeded);
 }

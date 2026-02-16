@@ -1,32 +1,33 @@
-﻿{
-"FileVersion": 3,
-"Version": 1,
-"VersionName": "1.0.0",
-"SemVersion": "1.0.0",
-"FriendlyName": "Tower Defense (Alpha)",
-"Description": "Tower Defense mod for Satisfactory. Defend your factory against waves of hostile creatures with turrets, drones and shields!",
-"Category": "Modding",
-"CreatedBy": "FuFu",
-"CreatedByURL": "",
-"DocsURL": "",
-"MarketplaceURL": "",
-"SupportURL": "",
-"CanContainContent": true,
-"IsBetaVersion": false,
-"IsExperimentalVersion": false,
-"Installed": false,
-"Modules": [
 {
-"Name": "MonPremierMod",
-"Type": "Runtime",
-"LoadingPhase": "PostDefault"
-}
-],
-"Plugins": [
-{
-"Name": "SML",
-"Enabled": true,
-"SemVersion": "^3.0.0"
-}
-]
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0.0",
+	"SemVersion": "1.0.0",
+	"FriendlyName": "Tower Defense (Alpha)",
+	"Description": "Tower Defense mod for Satisfactory. Defend your factory against waves of hostile creatures with turrets, drones and shields!",
+	"Category": "Modding",
+	"CreatedBy": "Valakey",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": true,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "MonPremierMod",
+			"Type": "Runtime",
+			"LoadingPhase": "PostDefault"
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "SML",
+			"Enabled": true,
+			"SemVersion": "^3.11.3"
+		}
+	],
+	"GameVersion": ">=416835"
 }

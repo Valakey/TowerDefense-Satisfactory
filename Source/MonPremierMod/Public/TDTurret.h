@@ -150,4 +150,11 @@ private:
     // Gestion visuelle du laser
     FVector LaserEndPoint;
     bool bLaserActive = false;
+    
+    // Timer debug (par instance, pas static)
+    float DebugLogTimer = 0.0f;
+    
+    // PERF: throttle target scan
+    float TargetScanTimer = 0.0f;
+    float TargetScanInterval = 0.3f;
 };

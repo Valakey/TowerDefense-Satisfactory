@@ -81,7 +81,7 @@ ATDEnemy::ATDEnemy()
     
     // Configuration du mesh visible
     VisibleMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-    VisibleMesh->SetCastShadow(true);
+    VisibleMesh->SetCastShadow(false);  // PERF: pas d'ombre par ennemi (50+ ennemis = trop lourd)
     VisibleMesh->SetVisibility(true);
     
 
@@ -183,37 +183,17 @@ void ATDEnemy::Tick(float DeltaTime)
     // Timer anti-spam collision
     if (CollisionLogTimer > 0.0f) CollisionLogTimer -= DeltaTime;
 
-    // === ATTERRISSAGE: attendre d'etre au sol avant de demander un chemin ===
+    // === ATTERRISSAGE: attendre d'etre au sol avant de bouger ===
     if (!bHasLanded)
     {
         UCharacterMovementComponent* MC = GetCharacterMovement();
         if (MC && MC->IsMovingOnGround())
         {
             bHasLanded = true;
-            UE_LOG(LogTemp, Warning, TEXT("TDEnemy %s: ATTERRI a %s, demande chemin..."), *GetName(), *GetActorLocation().ToString());
+            UE_LOG(LogTemp, Warning, TEXT("TDEnemy %s: ATTERRI a %s (flow field mode)"), *GetName(), *GetActorLocation().ToString());
             
-            // Maintenant qu'on est au sol, demander un chemin vers la cible
-            if (TargetBuilding && IsValid(TargetBuilding))
-            {
-                ATDCreatureSpawner* Spawner = nullptr;
-                for (TActorIterator<ATDCreatureSpawner> SpIt(GetWorld()); SpIt; ++SpIt) { Spawner = *SpIt; break; }
-                if (Spawner)
-                {
-                    TArray<FVector> Path = Spawner->GetGroundPathFor(GetActorLocation(), TargetBuilding->GetActorLocation());
-                    if (Path.Num() > 0)
-                    {
-                        Waypoints = Path;
-                        CurrentWaypointIndex = 0;
-                        UE_LOG(LogTemp, Warning, TEXT("  -> %d waypoints recus"), Path.Num());
-                    }
-                    else
-                    {
-                        UE_LOG(LogTemp, Warning, TEXT("  -> AUCUN chemin au sol, FindNearestReachableTarget"));
-                        FindNearestReachableTarget();
-                    }
-                }
-            }
-            else
+            // Plus besoin de BFS ici: le flow field sera query dans MoveTowardsTarget
+            if (!TargetBuilding || !IsValid(TargetBuilding))
             {
                 FindNearestReachableTarget();
             }
@@ -245,9 +225,10 @@ void ATDEnemy::Tick(float DeltaTime)
         AttackTimer -= DeltaTime;
     }
     
-    // === BLACKLIST: reset toutes les 15s pour re-essayer les cibles ===
+    // === BLACKLIST: reset toutes les 60s pour re-essayer les cibles ===
+    // (60s au lieu de 15s: eviter le ping-pong entre cibles inaccessibles)
     BlacklistResetTimer += DeltaTime;
-    if (BlacklistResetTimer >= 15.0f)
+    if (BlacklistResetTimer >= 60.0f)
     {
         BlacklistedTargets.Empty();
         BlacklistResetTimer = 0.0f;
@@ -406,61 +387,34 @@ void ATDEnemy::MoveTowardsTarget(float DeltaTime)
         ToTarget.Z = 0.0f;
         Direction = (DetourDirection * 0.7f + ToTarget * 0.3f).GetSafeNormal();
         DetourTimer -= DeltaTime;
-        if (DetourTimer <= 0.0f)
-        {
-            UE_LOG(LogTemp, Verbose, TEXT("[MOVE] %s: fin detour, retour waypoints wp=%d/%d"),
-                *GetName(), CurrentWaypointIndex, Waypoints.Num());
-        }
     }
-    // Suivre les waypoints du pathfinding terrain
-    else if (CurrentWaypointIndex < Waypoints.Num())
+    else
     {
-        FVector WP = Waypoints[CurrentWaypointIndex];
-        float DistToWP = FVector::Dist2D(MyLoc, WP);
-        
-        if (DistToWP < 250.0f)
+        // === FLOW FIELD: lookup O(1) au lieu de waypoints BFS ===
+        // Le Spawner a un flow field pre-calcule par cible, partage par tous les ennemis
+        if (!CachedSpawner.IsValid())
         {
-            int32 OldIdx = CurrentWaypointIndex;
-            CurrentWaypointIndex++;
-            
-            // Log chaque waypoint atteint
-            float DistToTarget = FVector::Dist(MyLoc, TargetBuilding->GetActorLocation());
-            if (CurrentWaypointIndex < Waypoints.Num())
-            {
-                FVector NextWP = Waypoints[CurrentWaypointIndex];
-                float DistToNextWP = FVector::Dist2D(MyLoc, NextWP);
-                float NextDistToTarget = FVector::Dist(NextWP, TargetBuilding->GetActorLocation());
-                // Detecter aller-retour: le prochain WP est-il plus loin de la cible?
-                bool bBacktrack = NextDistToTarget > DistToTarget + 200.0f;
-                UE_LOG(LogTemp, Warning, TEXT("[WP] %s: wp %d->%d/%d pos=%s nextWP=%s distWP=%.0f distCible=%.0f %s"),
-                    *GetName(), OldIdx, CurrentWaypointIndex, Waypoints.Num(),
-                    *MyLoc.ToString(), *NextWP.ToString(), DistToNextWP, DistToTarget,
-                    bBacktrack ? TEXT("BACKTRACK!") : TEXT("ok"));
-            }
-            else
-            {
-                UE_LOG(LogTemp, Warning, TEXT("[WP] %s: DERNIER wp %d atteint! distCible=%.0f -> mode DIRECT"),
-                    *GetName(), OldIdx, DistToTarget);
-            }
+            for (TActorIterator<ATDCreatureSpawner> SpIt(GetWorld()); SpIt; ++SpIt) { CachedSpawner = *SpIt; break; }
+        }
+        ATDCreatureSpawner* Spawner = Cast<ATDCreatureSpawner>(CachedSpawner.Get());
+        
+        FVector FlowDir = FVector::ZeroVector;
+        if (Spawner)
+        {
+            FlowDir = Spawner->QueryGroundFlow(MyLoc, TargetBuilding);
         }
         
-        if (CurrentWaypointIndex < Waypoints.Num())
+        if (!FlowDir.IsNearlyZero())
         {
-            Direction = (Waypoints[CurrentWaypointIndex] - MyLoc).GetSafeNormal();
-            Direction.Z = 0.0f;
+            // Flow field donne une direction valide -> suivre
+            Direction = FlowDir;
         }
         else
         {
-            // Tous les waypoints consommes -> aller direct vers la cible
+            // Hors grille ou inaccessible -> fallback direct vers la cible
             Direction = (TargetBuilding->GetActorLocation() - MyLoc).GetSafeNormal();
             Direction.Z = 0.0f;
         }
-    }
-    // Pas de waypoints -> aller direct vers la cible
-    else
-    {
-        Direction = (TargetBuilding->GetActorLocation() - MyLoc).GetSafeNormal();
-        Direction.Z = 0.0f;
     }
     
     AddMovementInput(Direction, 1.0f);
@@ -490,6 +444,28 @@ void ATDEnemy::CheckIfStuck(float DeltaTime)
                 FVector MyPos = GetActorLocation();
                 float DistToTarget = TargetBuilding ? FVector::Dist(MyPos, TargetBuilding->GetActorLocation()) : 99999.f;
                 bool bAtLastWP = (CurrentWaypointIndex >= Waypoints.Num());
+                
+                // === OPTI 0: Cible trop haute -> blacklister immediatement ===
+                // Un ennemi au sol ne peut pas grimper des murs/fondations
+                if (TargetBuilding && IsValid(TargetBuilding))
+                {
+                    float TargetHeightAbove = TargetBuilding->GetActorLocation().Z - MyPos.Z;
+                    if (TargetHeightAbove > 350.0f)
+                    {
+                        UE_LOG(LogTemp, Warning, TEXT("[STUCK] %s: cible %s TROP HAUTE (%.0fu au-dessus) -> blacklist!"),
+                            *GetName(), *TargetBuilding->GetName(), TargetHeightAbove);
+                        MarkTargetUnreachable(TargetBuilding);
+                        ConsecutiveStuckCount = 0;
+                        DetourAttempts = 0;
+                        StuckTimer = 0.0f;
+                        if (RetargetCooldown <= 0.0f)
+                        {
+                            FindNearestReachableTarget();
+                            RetargetCooldown = 3.0f;
+                        }
+                        return;
+                    }
+                }
                 
                 // === OPTI 1: Si proche de la cible, attaquer directement ===
                 // Meme si pas au dernier WP, si l'ennemi est stuck et proche -> forcer l'attaque
@@ -527,23 +503,26 @@ void ATDEnemy::CheckIfStuck(float DeltaTime)
                         FwdDir.Z = 0.0f;
                     }
                     
-                    for (TActorIterator<AActor> WIt(GetWorld()); WIt; ++WIt)
+                    // PERF: OverlapMulti au lieu de TActorIterator<AActor> (broadphase spatiale)
+                    TArray<FOverlapResult> WallOverlaps;
+                    FCollisionQueryParams WallParams;
+                    WallParams.AddIgnoredActor(this);
+                    GetWorld()->OverlapMultiByChannel(WallOverlaps, MyPos, FQuat::Identity, ECC_WorldStatic,
+                        FCollisionShape::MakeSphere(800.0f), WallParams);
+                    
+                    for (const FOverlapResult& WOv : WallOverlaps)
                     {
-                        AActor* WA = *WIt;
+                        AActor* WA = WOv.GetActor();
                         if (!WA || !IsValid(WA)) continue;
                         FString WC = WA->GetClass()->GetName();
                         if (!WC.StartsWith(TEXT("Build_"))) continue;
-                        // BLACKLIST: ignorer transport/infra (jamais destructibles pour passage)
-                        if (WC.Contains(TEXT("ConveyorBelt")) || WC.Contains(TEXT("ConveyorLift")) ||
-                            WC.Contains(TEXT("ConveyorAttachment")) || WC.Contains(TEXT("ConveyorPole")) ||
-                            WC.Contains(TEXT("PowerLine")) || WC.Contains(TEXT("Wire")) ||
-                            WC.Contains(TEXT("PowerPole")) || WC.Contains(TEXT("PowerTower")) ||
-                            WC.Contains(TEXT("Pipeline")) || WC.Contains(TEXT("PipeHyper")) ||
-                            WC.Contains(TEXT("PipeSupport")) || WC.Contains(TEXT("PipeJunction")) ||
-                            WC.Contains(TEXT("RailroadTrack")) || WC.Contains(TEXT("TrainStation")) ||
-                            WC.Contains(TEXT("TrainDocking")) || WC.Contains(TEXT("TrainPlatform")) ||
-                            WC.Contains(TEXT("Sign")) || WC.Contains(TEXT("Light")) ||
-                            WC.Contains(TEXT("Ladder")))
+                        // BLACKLIST: ignorer transport/infra
+                        if (WC.Contains(TEXT("Conveyor")) || WC.Contains(TEXT("PowerLine")) ||
+                            WC.Contains(TEXT("Wire")) || WC.Contains(TEXT("PowerPole")) ||
+                            WC.Contains(TEXT("PowerTower")) || WC.Contains(TEXT("Pipeline")) ||
+                            WC.Contains(TEXT("Pipe")) || WC.Contains(TEXT("Railroad")) ||
+                            WC.Contains(TEXT("Train")) || WC.Contains(TEXT("Sign")) ||
+                            WC.Contains(TEXT("Light")) || WC.Contains(TEXT("Ladder")))
                             continue;
                         // BLACKLIST: ignorer machines de production (cibles primaires, pas obstacles)
                         if (WC.Contains(TEXT("Constructor")) || WC.Contains(TEXT("Assembler")) ||
@@ -777,7 +756,7 @@ float ATDEnemy::TakeDamage(float DamageAmount, struct FDamageEvent const& Damage
     float ActualDamage = Super::TakeDamage(DamageAmount, DamageEvent, EventInstigator, DamageCauser);
     
     Health -= ActualDamage;
-    UE_LOG(LogTemp, Warning, TEXT("TDEnemy %s prend %.0f degats (HP: %.0f/%.0f)"), 
+    UE_LOG(LogTemp, Verbose, TEXT("TDEnemy %s prend %.0f degats (HP: %.0f/%.0f)"), 
         *GetName(), ActualDamage, Health, MaxHealth);
     
     if (Health <= 0.0f && !bIsDead)
@@ -841,7 +820,7 @@ void ATDEnemy::SetTarget(AActor* NewTarget)
         FailedAttackAttempts = 0;
         DetourAttempts = 0;
         DetourTimer = 0.0f;
-        UE_LOG(LogTemp, Warning, TEXT("TDEnemy %s cible: %s"), *GetName(), *NewTarget->GetName());
+        UE_LOG(LogTemp, Verbose, TEXT("TDEnemy %s cible: %s"), *GetName(), *NewTarget->GetName());
         
         // Jouer le son de changement de cible
         if (OneShotAudioComponent && TargetChangeSound)
@@ -885,9 +864,12 @@ void ATDEnemy::FindNearestReachableTarget()
     
     FVector MyLocation = GetActorLocation();
     
-    // Collecter les candidats avec score
+    // === SYSTEME DE PRIORITE A 2 PASSES ===
+    // Passe 1: cibles prioritaires (tourelles, machines, infra)
+    // Passe 2 (fallback): structures (murs, fondations, rampes, etc.)
     struct FCandidate { AActor* Actor; float Score; };
-    TArray<FCandidate> Candidates;
+    TArray<FCandidate> PrimaryCandidates;
+    TArray<FCandidate> StructureCandidates;
     
     for (TActorIterator<AActor> It(GetWorld()); It; ++It)
     {
@@ -904,21 +886,8 @@ void ATDEnemy::FindNearestReachableTarget()
         // Ignorer blacklistes
         if (IsTargetBlacklisted(Actor)) continue;
         
-        // Ignorer transport/infrastructure
-        if (ClassName.Contains(TEXT("ConveyorBelt")) || ClassName.Contains(TEXT("ConveyorLift")) ||
-            ClassName.Contains(TEXT("ConveyorAttachment")) ||
-            ClassName.Contains(TEXT("PowerLine")) || ClassName.Contains(TEXT("Wire")) ||
-            ClassName.Contains(TEXT("PowerPole")) || ClassName.Contains(TEXT("PowerTower")) ||
-            ClassName.Contains(TEXT("RailroadTrack")) || ClassName.Contains(TEXT("PillarBase")) ||
-            ClassName.Contains(TEXT("Beam")) || ClassName.Contains(TEXT("Stair")) ||
-            ClassName.Contains(TEXT("Pipeline")) || ClassName.Contains(TEXT("Pipe")))
-            continue;
-        
-        // Ignorer murs et fondations (cibles en CheckIfStuck, pas ici)
-        if (ClassName.Contains(TEXT("Wall")) || ClassName.Contains(TEXT("Foundation")) ||
-            ClassName.Contains(TEXT("Ramp")) || ClassName.Contains(TEXT("Fence")) ||
-            ClassName.Contains(TEXT("Roof")) || ClassName.Contains(TEXT("Frame")) ||
-            ClassName.Contains(TEXT("Pillar")) || ClassName.Contains(TEXT("Quarter")))
+        // Ignorer poutres et escaliers (non-destructibles)
+        if (ClassName.Contains(TEXT("Beam")) || ClassName.Contains(TEXT("Stair")))
             continue;
         
         // Ignorer objets non-attaquables et decoratifs
@@ -937,83 +906,82 @@ void ATDEnemy::FindNearestReachableTarget()
         float HeightDiff = ActorLoc.Z - MyLocation.Z;
         float Distance = FVector::Dist(MyLocation, ActorLoc);
         
-        // Max 150m (les ennemis peuvent etre loin de la base apres retarget)
+        // Max 150m
         if (Distance > 15000.0f) continue;
         
-        // Ennemi au sol: max +1500u de hauteur (tours avec fondations empilees)
-        if (HeightDiff > 1500.0f) continue;
+        // Ennemi au sol: max +500u de hauteur
+        if (HeightDiff > 500.0f) continue;
         
         // Score base sur la distance
         float Score = Distance;
         
-        // Bonus priorite: tourelles (x0.5), machines (x0.7), structures (x1.0)
-        if (bIsTDBuilding)
-            Score *= 0.5f;
-        else if (ClassName.Contains(TEXT("Constructor")) || ClassName.Contains(TEXT("Smelter")) ||
-                 ClassName.Contains(TEXT("Assembler")) || ClassName.Contains(TEXT("Manufacturer")) ||
-                 ClassName.Contains(TEXT("Miner")) || ClassName.Contains(TEXT("Foundry")) ||
-                 ClassName.Contains(TEXT("Refinery")) || ClassName.Contains(TEXT("Generator")) ||
-                 ClassName.Contains(TEXT("Packager")) || ClassName.Contains(TEXT("Blender")) ||
-                 ClassName.Contains(TEXT("Storage")))
-            Score *= 0.7f;
-        
         // Penalite de hauteur
-        if (HeightDiff > 0.0f)
-            Score += HeightDiff * 2.0f;
+        if (HeightDiff > 200.0f)
+            Score += HeightDiff * 10.0f;
+        else if (HeightDiff > 0.0f)
+            Score += HeightDiff * 3.0f;
         
-        Candidates.Add({Actor, Score});
+        // Detecter si c'est une structure (murs, fondations, etc.)
+        bool bIsStructure = ClassName.Contains(TEXT("Wall")) || ClassName.Contains(TEXT("Foundation")) ||
+            ClassName.Contains(TEXT("Ramp")) || ClassName.Contains(TEXT("Fence")) ||
+            ClassName.Contains(TEXT("Roof")) || ClassName.Contains(TEXT("Frame")) ||
+            ClassName.Contains(TEXT("Pillar")) || ClassName.Contains(TEXT("Quarter"));
+        
+        if (bIsStructure)
+        {
+            // Structures: priorite basse, distance max reduite (3000u = 30m)
+            if (Distance <= 3000.0f)
+            {
+                StructureCandidates.Add({Actor, Score});
+            }
+        }
+        else
+        {
+            // Cibles prioritaires: tourelles (x0.5), machines (x0.7), autres (x1.0)
+            if (bIsTDBuilding)
+                Score *= 0.5f;
+            else if (ClassName.Contains(TEXT("Constructor")) || ClassName.Contains(TEXT("Smelter")) ||
+                     ClassName.Contains(TEXT("Assembler")) || ClassName.Contains(TEXT("Manufacturer")) ||
+                     ClassName.Contains(TEXT("Miner")) || ClassName.Contains(TEXT("Foundry")) ||
+                     ClassName.Contains(TEXT("Refinery")) || ClassName.Contains(TEXT("Generator")) ||
+                     ClassName.Contains(TEXT("Packager")) || ClassName.Contains(TEXT("Blender")) ||
+                     ClassName.Contains(TEXT("Storage")))
+                Score *= 0.7f;
+            
+            PrimaryCandidates.Add({Actor, Score});
+        }
     }
     
-    // Trier par score (meilleur en premier)
-    Candidates.Sort([](const FCandidate& A, const FCandidate& B) { return A.Score < B.Score; });
+    // Trier les deux listes par score
+    PrimaryCandidates.Sort([](const FCandidate& A, const FCandidate& B) { return A.Score < B.Score; });
+    StructureCandidates.Sort([](const FCandidate& A, const FCandidate& B) { return A.Score < B.Score; });
     
-    // Prendre le meilleur candidat par score (le plus proche avec priorite)
+    // Passe 1: cible prioritaire
     AActor* BestTarget = nullptr;
-    
-    if (Candidates.Num() > 0)
+    if (PrimaryCandidates.Num() > 0)
     {
-        BestTarget = Candidates[0].Actor;
+        BestTarget = PrimaryCandidates[0].Actor;
+    }
+    // Passe 2 (fallback): structure la plus proche
+    else if (StructureCandidates.Num() > 0)
+    {
+        BestTarget = StructureCandidates[0].Actor;
+        UE_LOG(LogTemp, Verbose, TEXT("TDEnemy %s: FALLBACK structure %s (pas de cible prioritaire)"),
+            *GetName(), *BestTarget->GetName());
     }
     
     if (BestTarget)
     {
         SetTarget(BestTarget);
-        
-        // BFS DYNAMIQUE depuis position actuelle vers la cible (chemins walkable)
-        Waypoints.Empty();
-        CurrentWaypointIndex = 0;
-        if (Spawner)
-        {
-            TArray<FVector> Path = Spawner->GetGroundPathFor(MyLocation, BestTarget->GetActorLocation());
-            if (Path.Num() > 0)
-            {
-                Waypoints = Path;
-                CurrentWaypointIndex = 0;
-                UE_LOG(LogTemp, Warning, TEXT("TDEnemy %s: retarget %s, %d waypoints dynamiques"), *GetName(), *BestTarget->GetName(), Path.Num());
-            }
-            else
-            {
-                UE_LOG(LogTemp, Warning, TEXT("TDEnemy %s: retarget %s, AUCUN waypoint (BFS vide), ira en direct"), *GetName(), *BestTarget->GetName());
-            }
-        }
+        UE_LOG(LogTemp, Verbose, TEXT("TDEnemy %s: retarget %s (flow field)"), *GetName(), *BestTarget->GetName());
     }
     else
     {
-        // Si des cibles blacklistees mais aucun candidat restant -> vider la blacklist
-        if (BlacklistedTargets.Num() > 0)
-        {
-            UE_LOG(LogTemp, Warning, TEXT("[NOCIBLE] %s: blacklist epuisee (%d entries) -> reset blacklist"),
-                *GetName(), BlacklistedTargets.Num());
-            BlacklistedTargets.Empty();
-            // Ne pas recurser - le prochain ScanTimer reessayera avec blacklist vide
-        }
-        else
-        {
-            // Vraiment aucune cible -> ralentir les scans (prochain dans ~10s)
-            ScanTimer = -7.0f;
-            UE_LOG(LogTemp, Verbose, TEXT("[NOCIBLE] %s pos=%s candidats=0 blacklist=0 -> scan ralenti"),
-                *GetName(), *MyLocation.ToString());
-        }
+        // Pas de candidat valide -> ralentir les scans
+        // NE PAS vider la blacklist ici! Le timer de 60s s'en charge.
+        ScanTimer = -7.0f;  // Prochain scan dans ~10s
+        UE_LOG(LogTemp, Verbose, TEXT("[NOCIBLE] %s pos=%s candidats=0 blacklist=%d -> scan ralenti"),
+            *GetName(), *MyLocation.ToString(), BlacklistedTargets.Num());
     }
 }
 

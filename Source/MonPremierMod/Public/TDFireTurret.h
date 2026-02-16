@@ -162,6 +162,10 @@ private:
     void UpdateIdleAnimation(float DeltaTime);
 
     bool bIsFiring = false;
+    
+    // PERF: throttle target scan
+    float TargetScanTimer = 0.0f;
+    float TargetScanInterval = 0.3f;
 
     // Bullet tracers
     FTimerHandle TracerTimerHandle;

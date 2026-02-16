@@ -118,6 +118,10 @@ private:
     bool HasEnemiesInRange();
     void ApplyShockwave();
     void UpdateHammerPosition();
+    
+    // PERF: throttle enemy detection
+    float EnemyScanTimer = 0.0f;
+    bool bCachedEnemiesInRange = false;
 
     // Electricite
     void CheckPowerStatus();

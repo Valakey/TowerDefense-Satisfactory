@@ -98,6 +98,16 @@ struct FAttackPath
     float ZoneRadius = 0.0f;
 };
 
+// === FLOW FIELD: grille de directions pre-calculee par cible ===
+// BFS inverse depuis la cible -> chaque cellule pointe vers la cible
+// Tous les ennemis ciblant le meme batiment partagent le meme flow field
+struct FGroundFlowField
+{
+	int32 BaseGridIdx = -1;
+	TArray<uint8> Directions;  // 0-7 = direction vers la cible, 8 = sur la cible, 255 = inaccessible
+	bool bValid = false;
+};
+
 UCLASS(Blueprintable)
 class MONPREMIERMOD_API ATDCreatureSpawner : public AActor
 {
@@ -290,6 +300,19 @@ public:
     
     // Obtenir le centre de la base la plus proche (pour ennemis perdus)
     FVector GetNearestBaseCenter(const FVector& Position) const;
+    
+    // === FLOW FIELD API (optimisation: 1 BFS par cible au lieu de 1 par ennemi) ===
+    // Retourne la direction de mouvement au sol vers la cible (lookup O(1) par cellule)
+    FVector QueryGroundFlow(const FVector& Position, AActor* Target);
+    
+    // Invalider tous les flow fields (quand terrain/batiments changent)
+    void InvalidateAllFlowFields();
+
+    // === FLOW FIELD STORAGE ===
+    TMap<AActor*, FGroundFlowField> GroundFlowFields;
+    
+    // Construire le flow field pour une cible (BFS inverse)
+    void BuildFlowFieldForTarget(const FBaseGrid& Grid, int32 GridIdx, AActor* Target);
 
 protected:
     // Mettre a jour les effets visuels des batiments attaques

@@ -222,17 +222,23 @@ void ATDFireTurret::Tick(float DeltaTime)
     // Sauvegarder cible precedente pour detecter changement
     AActor* PreviousTarget = CurrentTarget;
 
+    // PERF: Throttle target scan toutes les 0.3s
+    TargetScanTimer += DeltaTime;
+    bool bDoScan = (TargetScanTimer >= TargetScanInterval);
+    if (bDoScan) TargetScanTimer = 0.0f;
+
     // Chercher une cible si on n'en a pas ou si elle est morte/hors portee
     if (!CurrentTarget || !IsValid(CurrentTarget))
     {
-        CurrentTarget = FindBestTarget();
+        if (bDoScan) CurrentTarget = FindBestTarget();
     }
     else
     {
         float DistanceToTarget = FVector::Dist(GetActorLocation(), CurrentTarget->GetActorLocation());
         if (DistanceToTarget > Range || IsEnemyDead(CurrentTarget))
         {
-            CurrentTarget = FindBestTarget();
+            if (bDoScan) CurrentTarget = FindBestTarget();
+            else CurrentTarget = nullptr;
         }
     }
 
@@ -496,11 +502,7 @@ void ATDFireTurret::FireBullet()
         MuzzleFlashComponent->Activate(true);
     }
 
-    // Particules d'impact
-    if (ImpactParticle)
-    {
-        UGameplayStatics::SpawnEmitterAtLocation(GetWorld(), ImpactParticle, End, FRotator::ZeroRotator, FVector(0.3f), true);
-    }
+    // PERF: SpawnEmitterAtLocation supprime (5x/sec = tres couteux)
 
     UE_LOG(LogTemp, Verbose, TEXT("TDFireTurret hit %s for %.1f damage | Ammo: %d/%d"),
         *CurrentTarget->GetName(), DamagePerBullet, CurrentAmmo, MaxAmmo);

@@ -14,11 +14,11 @@ ATDEnemyFlying::ATDEnemyFlying()
     // Collision sphere (remplace la capsule de ACharacter)
     CollisionSphere = CreateDefaultSubobject<USphereComponent>(TEXT("CollisionSphere"));
     CollisionSphere->InitSphereRadius(30.0f);
-    CollisionSphere->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+    CollisionSphere->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
     CollisionSphere->SetCollisionObjectType(ECC_Pawn);
     CollisionSphere->SetCollisionResponseToAllChannels(ECR_Ignore);
-    CollisionSphere->SetCollisionResponseToChannel(ECC_WorldStatic, ECR_Block);
-    CollisionSphere->SetCollisionResponseToChannel(ECC_WorldDynamic, ECR_Block);
+    CollisionSphere->SetCollisionResponseToChannel(ECC_WorldStatic, ECR_Overlap);
+    CollisionSphere->SetCollisionResponseToChannel(ECC_WorldDynamic, ECR_Overlap);
     CollisionSphere->SetCollisionResponseToChannel(ECC_Pawn, ECR_Overlap);
     CollisionSphere->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
     CollisionSphere->SetGenerateOverlapEvents(true);
@@ -33,7 +33,7 @@ ATDEnemyFlying::ATDEnemyFlying()
     VisibleMesh->SetRelativeScale3D(FVector(0.5f, 0.5f, 0.5f));
     VisibleMesh->SetRelativeRotation(FRotator(0.0f, -90.0f, 0.0f));
     VisibleMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-    VisibleMesh->SetCastShadow(true);
+    VisibleMesh->SetCastShadow(false);  // PERF: pas d'ombre par ennemi volant
 
     // Charger le mesh Enemy_Flying
     static ConstructorHelpers::FObjectFinder<UStaticMesh> EnemyMesh(TEXT("/MonPremierMod/Meshes/Ennemy/FlyEnemy/Enemy_Flying.Enemy_Flying"));
@@ -105,6 +105,13 @@ ATDEnemyFlying::ATDEnemyFlying()
         FlyingSound = FlyingSoundObj.Object;
     }
 
+    // Charger materiau hologramme (ShieldDome = translucide)
+    static ConstructorHelpers::FObjectFinder<UMaterialInterface> HoloMatFinder(TEXT("/MonPremierMod/Materials/M_ShieldDome.M_ShieldDome"));
+    if (HoloMatFinder.Succeeded())
+    {
+        HologramBaseMaterial = HoloMatFinder.Object;
+    }
+
     // Pas de controller AI
     AutoPossessAI = EAutoPossessAI::PlacedInWorldOrSpawned;
 }
@@ -135,18 +142,41 @@ void ATDEnemyFlying::BeginPlay()
         }
     }
 
-    // Sauvegarder le materiau original du mesh et creer un materiau noir pour le blink
-    if (VisibleMesh && VisibleMesh->GetNumMaterials() > 0)
+    // Sauvegarder TOUS les materiaux originaux du mesh
+    if (VisibleMesh)
     {
-        OriginalMaterial = VisibleMesh->GetMaterial(0);
-        BlackMaterial = UMaterialInstanceDynamic::Create(VisibleMesh->GetMaterial(0), this);
-        if (BlackMaterial)
+        OriginalMaterialCount = VisibleMesh->GetNumMaterials();
+        for (int32 i = 0; i < OriginalMaterialCount; i++)
         {
-            BlackMaterial->SetVectorParameterValue(TEXT("BaseColor"), FLinearColor(0.01f, 0.0f, 0.02f, 1.0f));
-            BlackMaterial->SetVectorParameterValue(TEXT("Color"), FLinearColor(0.01f, 0.0f, 0.02f, 1.0f));
-            BlackMaterial->SetVectorParameterValue(TEXT("Emissive"), FLinearColor(0.05f, 0.0f, 0.1f, 1.0f));
+            OriginalMaterials.Add(VisibleMesh->GetMaterial(i));
+        }
+        if (OriginalMaterialCount > 0)
+        {
+            OriginalMaterial = VisibleMesh->GetMaterial(0);
+            BlackMaterial = UMaterialInstanceDynamic::Create(VisibleMesh->GetMaterial(0), this);
+            if (BlackMaterial)
+            {
+                BlackMaterial->SetVectorParameterValue(TEXT("BaseColor"), FLinearColor(0.01f, 0.0f, 0.02f, 1.0f));
+                BlackMaterial->SetVectorParameterValue(TEXT("Color"), FLinearColor(0.01f, 0.0f, 0.02f, 1.0f));
+                BlackMaterial->SetVectorParameterValue(TEXT("Emissive"), FLinearColor(0.05f, 0.0f, 0.1f, 1.0f));
+            }
         }
     }
+
+    // Creer le materiau hologramme (cyan translucide) pour quand on traverse des objets
+    if (HologramBaseMaterial)
+    {
+        HologramMaterial = UMaterialInstanceDynamic::Create(HologramBaseMaterial, this);
+        if (HologramMaterial)
+        {
+            HologramMaterial->SetVectorParameterValue(TEXT("Color"), FLinearColor(0.0f, 0.8f, 1.0f, 0.3f));
+            HologramMaterial->SetVectorParameterValue(TEXT("BaseColor"), FLinearColor(0.0f, 0.8f, 1.0f, 0.3f));
+            HologramMaterial->SetScalarParameterValue(TEXT("Opacity"), 0.3f);
+        }
+    }
+    
+    UE_LOG(LogTemp, Verbose, TEXT("TDEnemyFlying %s: HologramBaseMat=%d HologramMat=%d OrigMatCount=%d VisibleMesh=%d"),
+        *GetName(), HologramBaseMaterial != nullptr, HologramMaterial != nullptr, OriginalMaterialCount, VisibleMesh != nullptr);
 
     // Son de vol en boucle
     if (FlyingAudioComponent && FlyingSound)
@@ -197,6 +227,104 @@ void ATDEnemyFlying::Tick(float DeltaTime)
     // Bob timer pour mouvement sinusoidal
     BobTimer += DeltaTime * BobFrequency;
 
+    // === HOLOGRAMME: detecter si on est a l'interieur d'un objet/ennemi ===
+    if (VisibleMesh && HologramMaterial)
+    {
+        bool bTouchingSomething = false;
+        
+        // Throttle: scan fallback seulement toutes les 0.2s (overlap query = chaque frame car pas cher)
+        HologramScanTimer += DeltaTime;
+        bool bDoFallbackScan = (HologramScanTimer >= 0.2f);
+        if (bDoFallbackScan) HologramScanTimer = 0.0f;
+        
+        // Methode 1: Overlap query avec TOUS les types d'objets (rapide, chaque frame)
+        {
+            TArray<FOverlapResult> GhostOverlaps;
+            FCollisionQueryParams OvParams;
+            OvParams.AddIgnoredActor(this);
+            FCollisionObjectQueryParams ObjParams;
+            ObjParams.AddObjectTypesToQuery(ECC_WorldStatic);
+            ObjParams.AddObjectTypesToQuery(ECC_WorldDynamic);
+            ObjParams.AddObjectTypesToQuery(ECC_Pawn);
+            ObjParams.AddObjectTypesToQuery(ECC_PhysicsBody);
+            ObjParams.AddObjectTypesToQuery(ECC_Vehicle);
+            ObjParams.AddObjectTypesToQuery(ECC_Destructible);
+            // Ajouter les channels custom Satisfactory (ECC_GameTraceChannel1 a 6)
+            ObjParams.AddObjectTypesToQuery(ECollisionChannel::ECC_GameTraceChannel1);
+            ObjParams.AddObjectTypesToQuery(ECollisionChannel::ECC_GameTraceChannel2);
+            ObjParams.AddObjectTypesToQuery(ECollisionChannel::ECC_GameTraceChannel3);
+            ObjParams.AddObjectTypesToQuery(ECollisionChannel::ECC_GameTraceChannel4);
+            ObjParams.AddObjectTypesToQuery(ECollisionChannel::ECC_GameTraceChannel5);
+            ObjParams.AddObjectTypesToQuery(ECollisionChannel::ECC_GameTraceChannel6);
+            
+            bTouchingSomething = GetWorld()->OverlapMultiByObjectType(
+                GhostOverlaps, GetActorLocation(), FQuat::Identity,
+                ObjParams, FCollisionShape::MakeSphere(10.0f), OvParams);
+        }
+        
+        // Methode 2 (fallback, throttle 0.2s): overlap Pawn pour detecter autres ennemis proches
+        if (!bTouchingSomething && bDoFallbackScan)
+        {
+            TArray<FOverlapResult> PawnOverlaps;
+            FCollisionQueryParams PawnParams;
+            PawnParams.AddIgnoredActor(this);
+            if (GetWorld()->OverlapMultiByChannel(PawnOverlaps, GetActorLocation(), FQuat::Identity,
+                ECC_Pawn, FCollisionShape::MakeSphere(150.0f), PawnParams))
+            {
+                bTouchingSomething = true;
+            }
+        }
+        
+        // Gerer le timer hologramme (persistence 3 secondes)
+        if (bTouchingSomething)
+        {
+            HologramTimer = HologramDuration; // Reset timer a 3s
+        }
+        else if (HologramTimer > 0.0f)
+        {
+            HologramTimer -= DeltaTime;
+        }
+        
+        bool bShouldBeHologram = (HologramTimer > 0.0f);
+        
+        // Activer hologramme
+        if (bShouldBeHologram && !bIsHologramActive)
+        {
+            bIsHologramActive = true;
+            // Forcer hologramme sur TOUS les slots materiaux
+            for (int32 i = 0; i < VisibleMesh->GetNumMaterials(); i++)
+            {
+                VisibleMesh->SetMaterial(i, HologramMaterial);
+            }
+            UE_LOG(LogTemp, Verbose, TEXT("TDEnemyFlying %s: HOLOGRAMME ACTIVE"), *GetName());
+        }
+        // Desactiver hologramme (timer expire)
+        else if (!bShouldBeHologram && bIsHologramActive)
+        {
+            bIsHologramActive = false;
+            // Restaurer les materiaux originaux
+            for (int32 i = 0; i < OriginalMaterials.Num() && i < VisibleMesh->GetNumMaterials(); i++)
+            {
+                if (bLaserActive && bBlinkState && BlackMaterial && i == 0)
+                    VisibleMesh->SetMaterial(i, BlackMaterial);
+                else
+                    VisibleMesh->SetMaterial(i, OriginalMaterials[i]);
+            }
+            UE_LOG(LogTemp, Verbose, TEXT("TDEnemyFlying %s: HOLOGRAMME DESACTIVE"), *GetName());
+        }
+        // Forcer le hologramme chaque frame tant qu'il est actif (au cas ou le blink l'ecrase)
+        else if (bShouldBeHologram && bIsHologramActive)
+        {
+            for (int32 i = 0; i < VisibleMesh->GetNumMaterials(); i++)
+            {
+                if (VisibleMesh->GetMaterial(i) != HologramMaterial)
+                {
+                    VisibleMesh->SetMaterial(i, HologramMaterial);
+                }
+            }
+        }
+    }
+
     // Toujours orienter l'oeil vers la cible
     RotateEyeTowardsTarget(DeltaTime);
 
@@ -205,86 +333,81 @@ void ATDEnemyFlying::Tick(float DeltaTime)
     // === VERIFICATION CIBLE VALIDE ===
     if (TargetBuilding && (!IsValid(TargetBuilding) || TargetBuilding->IsPendingKillPending()))
     {
-        UE_LOG(LogTemp, Warning, TEXT("TDEnemyFlying %s: cible detruite (par autre), reset!"), *GetName());
+        UE_LOG(LogTemp, Verbose, TEXT("TDEnemyFlying %s: cible detruite (par autre), reset!"), *GetName());
         StopLaser();
         TargetBuilding = nullptr;
         Waypoints.Empty();
         CurrentWaypointIndex = 0;
     }
     
-    // Verifier si la cible est marquee comme detruite (structures)
-    if (TargetBuilding)
+    // === PERF: Cache spawner (1 seule fois) ===
+    if (!CachedSpawner.IsValid())
     {
-        TArray<AActor*> Spawners;
-        UGameplayStatics::GetAllActorsOfClass(GetWorld(), ATDCreatureSpawner::StaticClass(), Spawners);
-        if (Spawners.Num() > 0)
+        for (TActorIterator<ATDCreatureSpawner> SpIt(GetWorld()); SpIt; ++SpIt) { CachedSpawner = *SpIt; break; }
+    }
+    ATDCreatureSpawner* SpawnerPtr = Cast<ATDCreatureSpawner>(CachedSpawner.Get());
+    
+    // Verifier si la cible est marquee comme detruite (via cache spawner, pas GetAllActorsOfClass)
+    if (TargetBuilding && SpawnerPtr && SpawnerPtr->IsBuildingDestroyed(TargetBuilding))
+    {
+        StopLaser();
+        TargetBuilding = nullptr;
+    }
+
+    // === PERF: Raycasts plafond/sol + targeting = THROTTLE toutes les 0.5s ===
+    TargetScanTimer += DeltaTime;
+    bool bDoFullScan = (TargetScanTimer >= TargetScanInterval);
+    if (bDoFullScan) TargetScanTimer = 0.0f;
+    
+    // Raycasts plafond/sol seulement pendant le scan (pas chaque frame)
+    float MyCeilingZ = MyLoc.Z + 10000.0f;
+    float MyFloorZ = MyLoc.Z - 10000.0f;
+    bool bUnderCeiling = false;
+    bool bAboveFloor = false;
+    
+    if (bDoFullScan)
+    {
+        FCollisionQueryParams EnvParams;
+        EnvParams.AddIgnoredActor(this);
+        FHitResult CeilHit;
+        bUnderCeiling = GetWorld()->LineTraceSingleByChannel(
+            CeilHit, MyLoc, MyLoc + FVector(0, 0, 500.0f), ECC_WorldStatic, EnvParams);
+        if (bUnderCeiling) MyCeilingZ = CeilHit.ImpactPoint.Z;
+        
+        FHitResult FloorHit;
+        bAboveFloor = GetWorld()->LineTraceSingleByChannel(
+            FloorHit, MyLoc, MyLoc - FVector(0, 0, 500.0f), ECC_WorldStatic, EnvParams);
+        if (bAboveFloor) MyFloorZ = FloorHit.ImpactPoint.Z;
+        
+        // Si la cible est au-dessus du plafond OU en-dessous du sol -> abandonner
+        if (TargetBuilding && IsValid(TargetBuilding))
         {
-            ATDCreatureSpawner* Spawner = Cast<ATDCreatureSpawner>(Spawners[0]);
-            if (Spawner && Spawner->IsBuildingDestroyed(TargetBuilding))
+            float TargetZ = TargetBuilding->GetActorLocation().Z;
+            if ((bUnderCeiling && TargetZ > MyCeilingZ + 100.0f) ||
+                (bAboveFloor && TargetZ < MyFloorZ - 100.0f))
             {
+                UE_LOG(LogTemp, Verbose, TEXT("TDEnemyFlying %s: cible inaccessible (plafond/sol), abandon!"), *GetName());
                 StopLaser();
                 TargetBuilding = nullptr;
             }
         }
     }
 
-    // === DETECTION PLAFOND: raycast vers le haut ===
-    FCollisionQueryParams CeilParams;
-    CeilParams.AddIgnoredActor(this);
-    FHitResult CeilHit;
-    float MyCeilingZ = MyLoc.Z + 10000.0f;
-    bool bUnderCeiling = GetWorld()->LineTraceSingleByChannel(
-        CeilHit, MyLoc, MyLoc + FVector(0, 0, 500.0f), ECC_WorldStatic, CeilParams);
-    if (bUnderCeiling)
-    {
-        MyCeilingZ = CeilHit.ImpactPoint.Z;
-    }
-
-    // === DETECTION SOL: raycast vers le bas ===
-    FCollisionQueryParams FloorParams;
-    FloorParams.AddIgnoredActor(this);
-    FHitResult FloorHit;
-    float MyFloorZ = MyLoc.Z - 10000.0f;
-    bool bAboveFloor = GetWorld()->LineTraceSingleByChannel(
-        FloorHit, MyLoc, MyLoc - FVector(0, 0, 500.0f), ECC_WorldStatic, FloorParams);
-    if (bAboveFloor)
-    {
-        MyFloorZ = FloorHit.ImpactPoint.Z;
-    }
-
-    // Si la cible est au-dessus du plafond OU en-dessous du sol -> abandonner
-    if (TargetBuilding && IsValid(TargetBuilding))
-    {
-        float TargetZ = TargetBuilding->GetActorLocation().Z;
-        if ((bUnderCeiling && TargetZ > MyCeilingZ + 100.0f) ||
-            (bAboveFloor && TargetZ < MyFloorZ - 100.0f))
-        {
-            UE_LOG(LogTemp, Warning, TEXT("TDEnemyFlying %s: cible %s inaccessible (plafond/sol), abandon!"), *GetName(), *TargetBuilding->GetName());
-            StopLaser();
-            TargetBuilding = nullptr;
-        }
-    }
-
-    // === SYSTEME DE CIBLAGE INTELLIGENT PAR COUCHES ===
-    // Scan tous les batiments dans la sphere de detection
-    FCollisionQueryParams DetectParams;
-    DetectParams.AddIgnoredActor(this);
-    FCollisionShape DetectSphere = FCollisionShape::MakeSphere(1000.0f);
+    // === SYSTEME DE CIBLAGE: seulement toutes les 0.5s (au lieu de chaque frame) ===
     TArray<FOverlapResult> Overlaps;
-    GetWorld()->OverlapMultiByChannel(Overlaps, MyLoc, FQuat::Identity, ECC_WorldStatic, DetectSphere, DetectParams);
-
-    // Recuperer le spawner pour verifier les batiments detruits
-    ATDCreatureSpawner* CachedSpawner = nullptr;
-    for (TActorIterator<ATDCreatureSpawner> SpIt(GetWorld()); SpIt; ++SpIt)
+    if (bDoFullScan)
     {
-        CachedSpawner = *SpIt;
-        break;
+        FCollisionQueryParams DetectParams;
+        DetectParams.AddIgnoredActor(this);
+        FCollisionShape DetectSphere = FCollisionShape::MakeSphere(1000.0f);
+        GetWorld()->OverlapMultiByChannel(Overlaps, MyLoc, FQuat::Identity, ECC_WorldStatic, DetectSphere, DetectParams);
     }
 
     // Listes de cibles par accessibilite et priorite
     AActor* BestAccessibleTurret = nullptr;   float BestATDist = MAX_FLT;
     AActor* BestAccessibleMachine = nullptr;  float BestAMDist = MAX_FLT;
     AActor* BestAccessibleStructure = nullptr; float BestASDist = MAX_FLT;
+    AActor* BestAccessibleInfra = nullptr;     float BestAIDist = MAX_FLT;
     AActor* BestBlockingWall = nullptr;        float BestBWScore = -MAX_FLT;
     // Pour le mur: on veut le mur qui bloque la machine la plus proche
     AActor* BestBlockedMachine = nullptr;      float BestBMDist = MAX_FLT;
@@ -304,21 +427,15 @@ void ATDEnemyFlying::Tick(float DeltaTime)
         if (!OvClass.StartsWith(TEXT("Build_")) && !bIsTDBuilding) continue;
 
         // Ignorer les batiments deja detruits
-        if (CachedSpawner && CachedSpawner->IsBuildingDestroyed(OvActor)) continue;
+        if (SpawnerPtr && SpawnerPtr->IsBuildingDestroyed(OvActor)) continue;
 
-        // Ignorer transport/infrastructure
-        if (OvClass.Contains(TEXT("ConveyorBelt")) || OvClass.Contains(TEXT("ConveyorLift")) ||
-            OvClass.Contains(TEXT("ConveyorAttachment")) ||
-            OvClass.Contains(TEXT("PowerLine")) || OvClass.Contains(TEXT("Wire")) ||
-            OvClass.Contains(TEXT("PowerPole")) || OvClass.Contains(TEXT("PowerTower")) ||
-            OvClass.Contains(TEXT("RailroadTrack")) || OvClass.Contains(TEXT("PillarBase")) ||
-            OvClass.Contains(TEXT("Beam")) || OvClass.Contains(TEXT("Stair")) ||
-            OvClass.Contains(TEXT("Pipeline")) || OvClass.Contains(TEXT("Pipe")))
+        // Ignorer poutres et escaliers (non-destructibles)
+        if (OvClass.Contains(TEXT("Beam")) || OvClass.Contains(TEXT("Stair")))
             continue;
         
         // Ignorer objets non-attaquables et decoratifs
         if (OvClass.Contains(TEXT("SpaceElevator")) || OvClass.Contains(TEXT("Ladder")) ||
-            OvClass.Contains(TEXT("ConveyorPole")) || OvClass.Contains(TEXT("Walkway")) ||
+            OvClass.Contains(TEXT("Walkway")) ||
             OvClass.Contains(TEXT("Catwalk")) || OvClass.Contains(TEXT("Sign")) ||
             OvClass.Contains(TEXT("Light")) || OvClass.Contains(TEXT("HubTerminal")) ||
             OvClass.Contains(TEXT("WorkBench")) || OvClass.Contains(TEXT("TradingPost")) ||
@@ -341,6 +458,13 @@ void ATDEnemyFlying::Tick(float DeltaTime)
                  OvClass.Contains(TEXT("Packager")) || OvClass.Contains(TEXT("Blender")) ||
                  OvClass.Contains(TEXT("Storage")))
             Prio = 2; // machine de production
+        else if (OvClass.Contains(TEXT("ConveyorBelt")) || OvClass.Contains(TEXT("ConveyorLift")) ||
+                 OvClass.Contains(TEXT("ConveyorAttachment")) || OvClass.Contains(TEXT("ConveyorPole")) ||
+                 OvClass.Contains(TEXT("PowerLine")) || OvClass.Contains(TEXT("Wire")) ||
+                 OvClass.Contains(TEXT("PowerPole")) || OvClass.Contains(TEXT("PowerTower")) ||
+                 OvClass.Contains(TEXT("RailroadTrack")) || OvClass.Contains(TEXT("PillarBase")) ||
+                 OvClass.Contains(TEXT("Pipeline")) || OvClass.Contains(TEXT("Pipe")))
+            Prio = 4; // infrastructure (basse priorite mais destructible)
 
         // Verifier la ligne de vue (LOS)
         FCollisionQueryParams LOSCheck;
@@ -357,6 +481,7 @@ void ATDEnemyFlying::Tick(float DeltaTime)
             if (Prio == 1 && Dist < BestATDist) { BestATDist = Dist; BestAccessibleTurret = OvActor; }
             else if (Prio == 2 && Dist < BestAMDist) { BestAMDist = Dist; BestAccessibleMachine = OvActor; }
             else if (Prio == 3 && Dist < BestASDist) { BestASDist = Dist; BestAccessibleStructure = OvActor; }
+            else if (Prio == 4 && Dist < BestAIDist) { BestAIDist = Dist; BestAccessibleInfra = OvActor; }
         }
         else if (Prio <= 2) // Seulement tracker les murs qui bloquent des cibles de valeur
         {
@@ -375,7 +500,9 @@ void ATDEnemyFlying::Tick(float DeltaTime)
         }
     }
 
-    // === DECISION DE CIBLAGE PAR COUCHE ===
+    // === DECISION DE CIBLAGE PAR COUCHE (seulement si scan actif) ===
+    if (bDoFullScan)
+    {
     AActor* SmartTarget = nullptr;
     bool bTargetIsWall = false;
 
@@ -386,12 +513,13 @@ void ATDEnemyFlying::Tick(float DeltaTime)
         SmartTarget = BestAccessibleMachine;
     else if (BestBlockingWall)
     {
-        // Pas de machine/turret accessible -> attaquer le mur qui bloque la machine la plus proche
         SmartTarget = BestBlockingWall;
         bTargetIsWall = true;
     }
     else if (BestAccessibleStructure)
         SmartTarget = BestAccessibleStructure;
+    else if (BestAccessibleInfra)
+        SmartTarget = BestAccessibleInfra;
 
     // Appliquer la decision
     if (SmartTarget)
@@ -401,9 +529,9 @@ void ATDEnemyFlying::Tick(float DeltaTime)
             SetTarget(SmartTarget);
             
             // Recalculer fly path dynamique depuis position actuelle
-            if (CachedSpawner)
+            if (SpawnerPtr)
             {
-                TArray<FVector> NewPath = CachedSpawner->GetFlyPathFor(MyLoc, SmartTarget->GetActorLocation());
+                TArray<FVector> NewPath = SpawnerPtr->GetFlyPathFor(MyLoc, SmartTarget->GetActorLocation());
                 if (NewPath.Num() > 0)
                 {
                     Waypoints = NewPath;
@@ -418,7 +546,7 @@ void ATDEnemyFlying::Tick(float DeltaTime)
             
             if (bTargetIsWall && BestBlockedMachine)
             {
-                UE_LOG(LogTemp, Warning, TEXT("TDEnemyFlying %s: mur %s bloque %s, attaque le mur!"),
+                UE_LOG(LogTemp, Verbose, TEXT("TDEnemyFlying %s: mur %s bloque %s, attaque le mur!"),
                     *GetName(), *SmartTarget->GetName(), *BestBlockedMachine->GetName());
             }
         }
@@ -435,13 +563,16 @@ void ATDEnemyFlying::Tick(float DeltaTime)
             FlyTowardsTarget(DeltaTime);
         }
     }
-    else if (TargetBuilding && IsValid(TargetBuilding))
+    } // fin bDoFullScan pour ciblage intelligent
+
+    // === COMPORTEMENT COURANT (chaque frame): attaque ou vol vers cible existante ===
+    if (!bDoFullScan && TargetBuilding && IsValid(TargetBuilding))
     {
         float DistanceToTarget = FVector::Dist(MyLoc, TargetBuilding->GetActorLocation());
 
         if (DistanceToTarget <= AttackRange)
         {
-            StuckTimer = 0.0f;  // On attaque, pas coince
+            StuckTimer = 0.0f;
             AttackTarget(DeltaTime);
         }
         else
@@ -450,98 +581,82 @@ void ATDEnemyFlying::Tick(float DeltaTime)
             FlyTowardsTarget(DeltaTime);
         }
     }
-    else
+    else if (!TargetBuilding || !IsValid(TargetBuilding))
     {
-        // Plus de cible - couper le laser
+        // Plus de cible - couper le laser, chercher seulement pendant les scans
         StopLaser();
-        // Cible detruite - chercher une nouvelle cible
-        UE_LOG(LogTemp, Warning, TEXT("TDEnemyFlying %s: cible detruite, recherche..."), *GetName());
-
-        // Priorite: turrets > machines > structures
-        AActor* BestTurret = nullptr;    float BestTurretDist = MAX_FLT;
-        AActor* BestMachine = nullptr;   float BestMachineDist = MAX_FLT;
-        AActor* BestStructure = nullptr; float BestStructureDist = MAX_FLT;
-        FVector MyLoc = GetActorLocation();
-
-        for (TActorIterator<AActor> It(GetWorld()); It; ++It)
+        
+        if (bDoFullScan)
         {
-            AActor* Actor = *It;
-            if (!Actor || !IsValid(Actor)) continue;
+            // Recherche fallback via TActorIterator (seulement toutes les 0.5s)
+            UE_LOG(LogTemp, Verbose, TEXT("TDEnemyFlying %s: cible detruite, recherche..."), *GetName());
 
-            // Ignorer les batiments au-dessus du plafond ou en-dessous du sol
-            float FallbackZ = Actor->GetActorLocation().Z;
-            if (bUnderCeiling && FallbackZ > MyCeilingZ + 100.0f) continue;
-            if (bAboveFloor && FallbackZ < MyFloorZ - 100.0f) continue;
+            AActor* BestTurret = nullptr;    float BestTurretDist = MAX_FLT;
+            AActor* BestMachine = nullptr;   float BestMachineDist = MAX_FLT;
+            AActor* BestStructure = nullptr; float BestStructureDist = MAX_FLT;
 
-            float Dist = FVector::Dist(MyLoc, Actor->GetActorLocation());
-            FString ClassName = Actor->GetClass()->GetName();
-
-            // Filtrer: seuls Build_* et TD* sont des batiments valides
-            bool bIsTDBld = ClassName.StartsWith(TEXT("TD")) && !ClassName.StartsWith(TEXT("TDEnemy")) && !ClassName.StartsWith(TEXT("TDCreature")) && !ClassName.StartsWith(TEXT("TDWorld")) && !ClassName.StartsWith(TEXT("TDDropship"));
-            if (!ClassName.StartsWith(TEXT("Build_")) && !bIsTDBld) continue;
-
-            // Ignorer transport/infrastructure
-            if (ClassName.Contains(TEXT("ConveyorBelt")) || ClassName.Contains(TEXT("ConveyorLift")) ||
-                ClassName.Contains(TEXT("ConveyorAttachment")) ||
-                ClassName.Contains(TEXT("PowerLine")) || ClassName.Contains(TEXT("Wire")) ||
-                ClassName.Contains(TEXT("PowerPole")) || ClassName.Contains(TEXT("PowerTower")) ||
-                ClassName.Contains(TEXT("RailroadTrack")) || ClassName.Contains(TEXT("PillarBase")) ||
-                ClassName.Contains(TEXT("Beam")) || ClassName.Contains(TEXT("Stair")) ||
-                ClassName.Contains(TEXT("Pipeline")) || ClassName.Contains(TEXT("Pipe")))
-                continue;
-            
-            // Ignorer murs/fondations (les volants passent par-dessus)
-            if (ClassName.Contains(TEXT("Wall")) || ClassName.Contains(TEXT("Foundation")) ||
-                ClassName.Contains(TEXT("Ramp")) || ClassName.Contains(TEXT("Fence")) ||
-                ClassName.Contains(TEXT("Roof")) || ClassName.Contains(TEXT("Frame")) ||
-                ClassName.Contains(TEXT("Pillar")) || ClassName.Contains(TEXT("Quarter")))
-                continue;
-            
-            // Ignorer objets non-attaquables et decoratifs
-            if (ClassName.Contains(TEXT("SpaceElevator")) || ClassName.Contains(TEXT("Ladder")) ||
-                ClassName.Contains(TEXT("ConveyorPole")) || ClassName.Contains(TEXT("Walkway")) ||
-                ClassName.Contains(TEXT("Catwalk")) || ClassName.Contains(TEXT("Sign")) ||
-                ClassName.Contains(TEXT("Light")) || ClassName.Contains(TEXT("HubTerminal")) ||
-                ClassName.Contains(TEXT("WorkBench")) || ClassName.Contains(TEXT("TradingPost")) ||
-                ClassName.Contains(TEXT("Tetromino")) || ClassName.Contains(TEXT("Potty")) ||
-                ClassName.Contains(TEXT("SnowDispenser")) || ClassName.Contains(TEXT("Decoration")) ||
-                ClassName.Contains(TEXT("Calendar")) || ClassName.Contains(TEXT("Fireworks")) ||
-                ClassName.Contains(TEXT("GolfCart")) || ClassName.Contains(TEXT("CandyCane")))
-                continue;
-
-            // Prio 1: Tourelles/defenses (TD*)
-            if (bIsTDBld)
+            for (TActorIterator<AActor> It(GetWorld()); It; ++It)
             {
-                if (Dist < BestTurretDist) { BestTurretDist = Dist; BestTurret = Actor; }
-            }
-            // Prio 2: Machines de production
-            else if (ClassName.Contains(TEXT("Constructor")) ||
-                     ClassName.Contains(TEXT("Assembler")) ||
-                     ClassName.Contains(TEXT("Manufacturer")) ||
-                     ClassName.Contains(TEXT("Smelter")) ||
-                     ClassName.Contains(TEXT("Foundry")) ||
-                     ClassName.Contains(TEXT("Refinery")) ||
-                     ClassName.Contains(TEXT("Generator")) ||
-                     ClassName.Contains(TEXT("Miner")) ||
-                     ClassName.Contains(TEXT("Packager")) ||
-                     ClassName.Contains(TEXT("Blender")))
-            {
-                if (Dist < BestMachineDist) { BestMachineDist = Dist; BestMachine = Actor; }
-            }
-            // Prio 3: Autres structures Build_*
-            else
-            {
-                if (Dist < BestStructureDist) { BestStructureDist = Dist; BestStructure = Actor; }
-            }
-        }
+                AActor* Actor = *It;
+                if (!Actor || !IsValid(Actor)) continue;
 
-        AActor* BestTarget = BestTurret;
-        if (!BestTarget) BestTarget = BestMachine;
-        if (!BestTarget) BestTarget = BestStructure;
+                float Dist = FVector::Dist(MyLoc, Actor->GetActorLocation());
+                FString ClassName = Actor->GetClass()->GetName();
 
-        if (BestTarget)
-        {
-            SetTarget(BestTarget);
+                bool bIsTDBld = ClassName.StartsWith(TEXT("TD")) && !ClassName.StartsWith(TEXT("TDEnemy")) && !ClassName.StartsWith(TEXT("TDCreature")) && !ClassName.StartsWith(TEXT("TDWorld")) && !ClassName.StartsWith(TEXT("TDDropship"));
+                if (!ClassName.StartsWith(TEXT("Build_")) && !bIsTDBld) continue;
+
+                if (ClassName.Contains(TEXT("Beam")) || ClassName.Contains(TEXT("Stair")))
+                    continue;
+                
+                if (ClassName.Contains(TEXT("Wall")) || ClassName.Contains(TEXT("Foundation")) ||
+                    ClassName.Contains(TEXT("Ramp")) || ClassName.Contains(TEXT("Fence")) ||
+                    ClassName.Contains(TEXT("Roof")) || ClassName.Contains(TEXT("Frame")) ||
+                    ClassName.Contains(TEXT("Pillar")) || ClassName.Contains(TEXT("Quarter")))
+                    continue;
+                
+                if (ClassName.Contains(TEXT("SpaceElevator")) || ClassName.Contains(TEXT("Ladder")) ||
+                    ClassName.Contains(TEXT("Walkway")) ||
+                    ClassName.Contains(TEXT("Catwalk")) || ClassName.Contains(TEXT("Sign")) ||
+                    ClassName.Contains(TEXT("Light")) || ClassName.Contains(TEXT("HubTerminal")) ||
+                    ClassName.Contains(TEXT("WorkBench")) || ClassName.Contains(TEXT("TradingPost")) ||
+                    ClassName.Contains(TEXT("Tetromino")) || ClassName.Contains(TEXT("Potty")) ||
+                    ClassName.Contains(TEXT("SnowDispenser")) || ClassName.Contains(TEXT("Decoration")) ||
+                    ClassName.Contains(TEXT("Calendar")) || ClassName.Contains(TEXT("Fireworks")) ||
+                    ClassName.Contains(TEXT("GolfCart")) || ClassName.Contains(TEXT("CandyCane")))
+                    continue;
+
+                if (bIsTDBld)
+                {
+                    if (Dist < BestTurretDist) { BestTurretDist = Dist; BestTurret = Actor; }
+                }
+                else if (ClassName.Contains(TEXT("Constructor")) ||
+                         ClassName.Contains(TEXT("Assembler")) ||
+                         ClassName.Contains(TEXT("Manufacturer")) ||
+                         ClassName.Contains(TEXT("Smelter")) ||
+                         ClassName.Contains(TEXT("Foundry")) ||
+                         ClassName.Contains(TEXT("Refinery")) ||
+                         ClassName.Contains(TEXT("Generator")) ||
+                         ClassName.Contains(TEXT("Miner")) ||
+                         ClassName.Contains(TEXT("Packager")) ||
+                         ClassName.Contains(TEXT("Blender")))
+                {
+                    if (Dist < BestMachineDist) { BestMachineDist = Dist; BestMachine = Actor; }
+                }
+                else
+                {
+                    if (Dist < BestStructureDist) { BestStructureDist = Dist; BestStructure = Actor; }
+                }
+            }
+
+            AActor* BestTarget = BestTurret;
+            if (!BestTarget) BestTarget = BestMachine;
+            if (!BestTarget) BestTarget = BestStructure;
+
+            if (BestTarget)
+            {
+                SetTarget(BestTarget);
+            }
         }
     }
 }
@@ -553,8 +668,7 @@ void ATDEnemyFlying::FlyTowardsTarget(float DeltaTime)
     FVector MyLocation = GetActorLocation();
     FVector TargetLocation = TargetBuilding->GetActorLocation();
 
-    // === MODE WAYPOINTS 3D: suivre le chemin pre-calcule (ZERO raycast) ===
-    // Les waypoints sont dans des voxels AIR, donc aucune collision possible
+    // === MODE WAYPOINTS 3D: suivre le chemin pre-calcule ===
     bool bFollowingWaypoints = (CurrentWaypointIndex < Waypoints.Num());
     
     FVector EffectiveTarget = TargetLocation;
@@ -568,159 +682,52 @@ void ATDEnemyFlying::FlyTowardsTarget(float DeltaTime)
         if (CurrentWaypointIndex < Waypoints.Num())
         {
             EffectiveTarget = Waypoints[CurrentWaypointIndex];
-            bFollowingWaypoints = true;
         }
         else
         {
-            bFollowingWaypoints = false;  // Waypoints finis, mode direct
+            bFollowingWaypoints = false;
         }
     }
     
+    // === Calcul hauteur cible ===
     float TargetZ;
-    float FloorZ = MyLocation.Z - 1000.0f;
-    bool bHasCeiling = false;
-    float CeilingZ = MyLocation.Z + 10000.0f;
-    
     if (bFollowingWaypoints)
     {
-        // En mode waypoint: voler DIRECTEMENT vers le waypoint
-        // Les murs sont detectes dans la grille voxel (raycasts horizontaux Phase 1.5)
-        // donc le chemin BFS contourne deja les murs - ZERO raycast runtime
+        // En mode waypoint: voler DIRECTEMENT vers le waypoint (pas de raycast)
         TargetZ = EffectiveTarget.Z;
     }
     else
     {
-        // Mode fallback: raycasts classiques (plus de waypoints)
-        FCollisionQueryParams Params;
-        Params.AddIgnoredActor(this);
-        
-        FHitResult GroundHit;
-        if (GetWorld()->LineTraceSingleByChannel(
-            GroundHit, MyLocation, MyLocation + FVector(0, 0, -5000.0f), ECC_WorldStatic, Params))
-        {
-            FloorZ = GroundHit.ImpactPoint.Z;
-        }
-        
-        FHitResult CeilingHit;
-        bHasCeiling = GetWorld()->LineTraceSingleByChannel(
-            CeilingHit, MyLocation, MyLocation + FVector(0, 0, 2000.0f), ECC_WorldStatic, Params);
-        if (bHasCeiling) CeilingZ = CeilingHit.ImpactPoint.Z;
-        
+        // Mode direct vers la cible: voler a hauteur cible + offset
         FVector ToTarget2DCheck = FVector(TargetLocation.X - MyLocation.X, TargetLocation.Y - MyLocation.Y, 0.0f);
         float HDist = ToTarget2DCheck.Size();
         
         if (HDist < AttackRange * 0.8f)
             TargetZ = TargetLocation.Z + FlyHeightOffset;
         else
-            TargetZ = FloorZ + 500.0f;
-        
-        TargetZ = FMath::Max(TargetZ, FloorZ + 150.0f);
-        if (bHasCeiling) TargetZ = FMath::Min(TargetZ, CeilingZ - 80.0f);
-        if (bHasCeiling && (CeilingZ - FloorZ) < 200.0f) TargetZ = (FloorZ + CeilingZ) / 2.0f;
+            TargetZ = TargetLocation.Z + 500.0f;
     }
 
-    // === Mouvement vers la cible effective ===
+    // === Mouvement direct vers la cible (INTANGIBLE - traverse tout) ===
     FVector ToTarget2D = FVector(EffectiveTarget.X - MyLocation.X, EffectiveTarget.Y - MyLocation.Y, 0.0f);
     FVector HorizontalDir = ToTarget2D.GetSafeNormal();
     if (HorizontalDir.IsNearlyZero()) HorizontalDir = FVector::ForwardVector;
 
-    // === MEMOIRE DE MUR: contourner au lieu de foncer dans le mur ===
-    // Quand on a touche un mur, on blend la direction avec le slide pendant WallAvoidTimer
-    if (WallAvoidTimer > 0.0f)
-    {
-        WallAvoidTimer -= DeltaTime;
-        // Slide = direction projetee sur le plan du mur
-        FVector SlideDir = FVector::VectorPlaneProject(HorizontalDir, FVector(WallAvoidNormal.X, WallAvoidNormal.Y, 0.0f).GetSafeNormal());
-        if (!SlideDir.IsNearlyZero())
-        {
-            SlideDir.Normalize();
-            // Plus le timer est haut, plus on contourne (80% slide -> 20% slide)
-            float BlendAlpha = FMath::Clamp(WallAvoidTimer / 2.0f, 0.2f, 0.8f);
-            HorizontalDir = FMath::Lerp(HorizontalDir, SlideDir, BlendAlpha).GetSafeNormal();
-        }
-        else
-        {
-            // Slide direction nulle = mur pile en face -> ajouter composante laterale
-            FVector Lateral = FVector::CrossProduct(FVector::UpVector, WallAvoidNormal).GetSafeNormal();
-            HorizontalDir = (HorizontalDir * 0.3f + Lateral * 0.7f).GetSafeNormal();
-        }
-    }
-
     float ZDiff = TargetZ - MyLocation.Z;
     float VerticalSpeed = FMath::Clamp(ZDiff * 3.0f, -FlySpeed, FlySpeed);
-
-    // === Separation entre volants ===
-    FVector SeparationForce = FVector::ZeroVector;
-    for (TActorIterator<ATDEnemyFlying> It(GetWorld()); It; ++It)
-    {
-        ATDEnemyFlying* Other = *It;
-        if (!Other || Other == this || Other->bIsDead) continue;
-        float Dist = FVector::Dist(MyLocation, Other->GetActorLocation());
-        if (Dist < 350.0f && Dist > 1.0f)
-        {
-            FVector Away = (MyLocation - Other->GetActorLocation()).GetSafeNormal();
-            SeparationForce += Away * (1.0f - Dist / 350.0f);
-        }
-    }
 
     // === Bob sinusoidal ===
     float BobOffset = FMath::Sin(BobTimer) * BobAmplitude * DeltaTime;
 
-    // === Mouvement final ===
+    // === Mouvement final (pas de sweep, pas de collision, pas de separation) ===
     FVector Movement = HorizontalDir * FlySpeed * DeltaTime
         + FVector(0, 0, VerticalSpeed * DeltaTime)
-        + FVector(0, 0, BobOffset)
-        + SeparationForce * 100.0f * DeltaTime;
+        + FVector(0, 0, BobOffset);
 
-    FVector NewLocation = MyLocation + Movement;
-    FHitResult SweepHit;
-    SetActorLocation(NewLocation, true, &SweepHit);
+    // SetActorLocation SANS sweep (false) = traverse tout
+    SetActorLocation(MyLocation + Movement, false);
 
-    if (SweepHit.bBlockingHit)
-    {
-        // Glisser le long de la surface
-        FVector SlideMovement = FVector::VectorPlaneProject(Movement, SweepHit.ImpactNormal);
-        FHitResult SlideHit;
-        SetActorLocation(GetActorLocation() + SlideMovement, true, &SlideHit);
-        
-        // MEMORISER le mur pour contourner les prochaines frames
-        WallAvoidNormal = SweepHit.ImpactNormal;
-        WallAvoidTimer = 2.0f;
-    }
-
-    // === DETECTION DE BLOCAGE (simplifiee) ===
-    FVector PostMoveLocation = GetActorLocation();
-    float MovedDist = FVector::Dist(MyLocation, PostMoveLocation);
-    if (MovedDist < 3.0f)
-    {
-        StuckTimer += DeltaTime;
-        
-        // Sauter les waypoints proches si on est coince dessus
-        if (bFollowingWaypoints && CurrentWaypointIndex < Waypoints.Num())
-        {
-            if (StuckTimer > 0.8f)
-            {
-                CurrentWaypointIndex++;
-                StuckTimer = 0.0f;
-            }
-        }
-        
-        // Si coince > 3s sans waypoints: forcer montee + contournement
-        if (StuckTimer > 3.0f)
-        {
-            FVector ForceUp = FVector(WallAvoidNormal.X * 0.5f, WallAvoidNormal.Y * 0.5f, 1.0f).GetSafeNormal();
-            SetActorLocation(PostMoveLocation + ForceUp * FlySpeed * DeltaTime * 3.0f, true);
-            WallAvoidTimer = 3.0f;  // Contourner longtemps apres montee
-            StuckTimer = 0.0f;
-            UE_LOG(LogTemp, Verbose, TEXT("TDEnemyFlying %s: coince 3s, force montee+contournement"), *GetName());
-        }
-    }
-    else
-    {
-        StuckTimer = 0.0f;
-    }
-
-    // Orienter l'oeil dans la direction de deplacement horizontale
+    // Orienter dans la direction de deplacement
     if (!HorizontalDir.IsNearlyZero())
     {
         FRotator MoveRotation = HorizontalDir.Rotation();
@@ -756,17 +763,11 @@ void ATDEnemyFlying::AttackTarget(float DeltaTime)
     {
         float DamageThisTick = AttackDamage * DamageInterval;
 
-        // Trouver le spawner pour utiliser son systeme de PV
-        TArray<AActor*> Spawners;
-        UGameplayStatics::GetAllActorsOfClass(GetWorld(), ATDCreatureSpawner::StaticClass(), Spawners);
-
-        if (Spawners.Num() > 0)
+        // Utiliser le spawner cache (pas de GetAllActorsOfClass chaque tick)
+        ATDCreatureSpawner* DmgSpawner = Cast<ATDCreatureSpawner>(CachedSpawner.Get());
+        if (DmgSpawner)
         {
-            ATDCreatureSpawner* Spawner = Cast<ATDCreatureSpawner>(Spawners[0]);
-            if (Spawner)
-            {
-                Spawner->DamageBuilding(TargetBuilding, DamageThisTick);
-            }
+            DmgSpawner->DamageBuilding(TargetBuilding, DamageThisTick);
         }
 
         // Life steal: recuperer des HP egaux aux degats infliges (cap a MaxHealth)
@@ -781,17 +782,15 @@ void ATDEnemyFlying::AttackTarget(float DeltaTime)
     // Mettre a jour le visuel du laser
     UpdateLaserVisual();
 
-    // Faire clignoter le mesh en noir pendant le tir
-    if (VisibleMesh && BlackMaterial && OriginalMaterial)
+    // Faire clignoter le mesh en noir pendant le tir (SAUF si hologramme actif)
+    if (VisibleMesh && BlackMaterial && OriginalMaterial && !bIsHologramActive)
     {
         float Pulse = FMath::Sin(GetWorld()->GetTimeSeconds() * 8.0f);
-        if (Pulse > 0.0f)
+        bool bNewBlinkState = (Pulse > 0.0f);
+        if (bNewBlinkState != bBlinkState)
         {
-            VisibleMesh->SetMaterial(0, BlackMaterial);
-        }
-        else
-        {
-            VisibleMesh->SetMaterial(0, OriginalMaterial);
+            bBlinkState = bNewBlinkState;
+            VisibleMesh->SetMaterial(0, bBlinkState ? BlackMaterial : OriginalMaterial);
         }
     }
 
@@ -828,8 +827,8 @@ void ATDEnemyFlying::StopLaser()
     {
         LaserBeam->SetVisibility(false);
     }
-    // Restaurer le materiau original
-    if (VisibleMesh && OriginalMaterial)
+    // Restaurer le materiau original (SAUF si hologramme actif)
+    if (VisibleMesh && OriginalMaterial && !bIsHologramActive)
     {
         VisibleMesh->SetMaterial(0, OriginalMaterial);
     }
@@ -873,7 +872,7 @@ void ATDEnemyFlying::SetTarget(AActor* NewTarget)
     TargetBuilding = NewTarget;
     if (NewTarget)
     {
-        UE_LOG(LogTemp, Warning, TEXT("TDEnemyFlying %s cible: %s"), *GetName(), *NewTarget->GetName());
+        UE_LOG(LogTemp, Verbose, TEXT("TDEnemyFlying %s cible: %s"), *GetName(), *NewTarget->GetName());
     }
 }
 

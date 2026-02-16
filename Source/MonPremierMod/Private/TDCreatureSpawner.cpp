@@ -1094,14 +1094,8 @@ AActor* ATDCreatureSpawner::FindNearestBuilding(const FVector& FromLocation)
         bool bIsTDBuilding = ClassName.StartsWith(TEXT("TD")) && !ClassName.StartsWith(TEXT("TDEnemy")) && !ClassName.StartsWith(TEXT("TDCreature")) && !ClassName.StartsWith(TEXT("TDWorld")) && !ClassName.StartsWith(TEXT("TDDropship"));
         if (!ClassName.StartsWith(TEXT("Build_")) && !bIsTDBuilding) continue;
         
-        // Ignorer transport/infrastructure (trop petits pour etre cibles)
-        if (ClassName.Contains(TEXT("ConveyorBelt")) || ClassName.Contains(TEXT("ConveyorLift")) ||
-            ClassName.Contains(TEXT("ConveyorAttachment")) ||
-            ClassName.Contains(TEXT("PowerLine")) || ClassName.Contains(TEXT("Wire")) ||
-            ClassName.Contains(TEXT("PowerPole")) || ClassName.Contains(TEXT("PowerTower")) ||
-            ClassName.Contains(TEXT("RailroadTrack")) || ClassName.Contains(TEXT("PillarBase")) ||
-            ClassName.Contains(TEXT("Beam")) || ClassName.Contains(TEXT("Stair")) ||
-            ClassName.Contains(TEXT("Pipeline")) || ClassName.Contains(TEXT("Pipe")))
+        // Ignorer poutres et escaliers (non-destructibles)
+        if (ClassName.Contains(TEXT("Beam")) || ClassName.Contains(TEXT("Stair")))
             continue;
         
         // Ignorer murs et fondations (ennemis se bloquent dessus)
@@ -1113,7 +1107,7 @@ AActor* ATDCreatureSpawner::FindNearestBuilding(const FVector& FromLocation)
         
         // Ignorer objets non-attaquables et decoratifs
         if (ClassName.Contains(TEXT("SpaceElevator")) || ClassName.Contains(TEXT("Ladder")) ||
-            ClassName.Contains(TEXT("ConveyorPole")) || ClassName.Contains(TEXT("Walkway")) ||
+            ClassName.Contains(TEXT("Walkway")) ||
             ClassName.Contains(TEXT("Catwalk")) || ClassName.Contains(TEXT("Sign")) ||
             ClassName.Contains(TEXT("Light")) || ClassName.Contains(TEXT("HubTerminal")) ||
             ClassName.Contains(TEXT("WorkBench")) || ClassName.Contains(TEXT("TradingPost")) ||
@@ -2067,11 +2061,136 @@ TArray<FVector> ATDCreatureSpawner::FindFlyPath(const FBaseGrid& G, const FVecto
     return Result;
 }
 
+// === FLOW FIELD: BFS inverse depuis la cible ===
+// 1 seul BFS par batiment cible, partage par tous les ennemis qui le ciblent
+void ATDCreatureSpawner::BuildFlowFieldForTarget(const FBaseGrid& Grid, int32 GridIdx, AActor* Target)
+{
+    FGroundFlowField FF;
+    FF.BaseGridIdx = GridIdx;
+    int32 Total = Grid.W * Grid.H;
+    FF.Directions.SetNum(Total);
+    for (uint8& d : FF.Directions) d = 255;  // inaccessible par defaut
+    
+    FIntPoint TC = Grid.WorldToCell(Target->GetActorLocation());
+    TC.X = FMath::Clamp(TC.X, 0, Grid.W - 1);
+    TC.Y = FMath::Clamp(TC.Y, 0, Grid.H - 1);
+    int32 TI = Grid.ColIdx(TC.X, TC.Y);
+    
+    // Snap cible vers cellule walkable la plus proche (rayon 15 cells)
+    if (!Grid.Walkable[TI] || Grid.GroundZ[TI] < -90000.0f)
+    {
+        float BestD = MAX_FLT; int32 BestI = -1; FIntPoint BestC = TC;
+        int32 R = 15;
+        for (int32 dy = -R; dy <= R; dy++)
+        {
+            for (int32 dx = -R; dx <= R; dx++)
+            {
+                int32 NX = TC.X + dx, NY = TC.Y + dy;
+                if (!Grid.IsValid2D(NX, NY)) continue;
+                int32 NI = Grid.ColIdx(NX, NY);
+                if (!Grid.Walkable[NI] || Grid.GroundZ[NI] < -90000.0f) continue;
+                float D = FMath::Sqrt((float)(dx*dx + dy*dy));
+                if (D < BestD) { BestD = D; BestI = NI; BestC = FIntPoint(NX, NY); }
+            }
+        }
+        if (BestI >= 0) { TC = BestC; TI = BestI; }
+    }
+    
+    FF.Directions[TI] = 8;  // 8 = SUR la cible
+    
+    // BFS depuis la cible vers l'exterieur
+    TArray<int32> Q;
+    Q.Reserve(Total / 4);
+    Q.Add(TI);
+    int32 Head = 0;
+    static const int32 DX[] = {-1, 0, 1, -1, 1, -1, 0, 1};
+    static const int32 DY[] = {-1, -1, -1, 0, 0, 1, 1, 1};
+    
+    while (Head < Q.Num() && Head < 200000)
+    {
+        int32 Cur = Q[Head++];
+        int32 CX = Cur % Grid.W, CY = Cur / Grid.W;
+        float CZ = Grid.GroundZ[Cur];
+        
+        for (int32 d = 0; d < 8; d++)
+        {
+            int32 NX = CX + DX[d], NY = CY + DY[d];
+            if (!Grid.IsValid2D(NX, NY)) continue;
+            int32 NI = Grid.ColIdx(NX, NY);
+            if (FF.Directions[NI] != 255) continue;  // deja visite
+            if (!Grid.Walkable[NI]) continue;
+            float NZ = Grid.GroundZ[NI];
+            if (FMath::Abs(NZ - CZ) > 200.0f) continue;  // pente trop raide
+            
+            // Direction INVERSE: de N vers Cur (vers la cible)
+            // d va de Cur vers N, donc l'oppose (7-d) va de N vers Cur
+            FF.Directions[NI] = (uint8)(7 - d);
+            Q.Add(NI);
+        }
+    }
+    
+    FF.bValid = true;
+    GroundFlowFields.Add(Target, FF);
+    
+    UE_LOG(LogTemp, Log, TEXT("FlowField: construit pour %s, %d cellules accessibles sur %d"),
+        *Target->GetName(), Q.Num(), Total);
+}
+
+// Lookup O(1): obtenir la direction vers la cible depuis n'importe quelle position
+FVector ATDCreatureSpawner::QueryGroundFlow(const FVector& Position, AActor* Target)
+{
+    if (!Target || !IsValid(Target) || !bTerrainMapReady)
+        return FVector::ZeroVector;
+    
+    // Lazy build: construire le flow field si pas encore fait
+    FGroundFlowField* FF = GroundFlowFields.Find(Target);
+    if (!FF || !FF->bValid)
+    {
+        int32 Idx = FindNearestBaseGrid(Target->GetActorLocation());
+        if (Idx < 0) return FVector::ZeroVector;
+        BuildFlowFieldForTarget(BaseGrids[Idx], Idx, Target);
+        FF = GroundFlowFields.Find(Target);
+        if (!FF) return FVector::ZeroVector;
+    }
+    
+    int32 GIdx = FF->BaseGridIdx;
+    if (GIdx < 0 || GIdx >= BaseGrids.Num()) return FVector::ZeroVector;
+    const FBaseGrid& G = BaseGrids[GIdx];
+    
+    FIntPoint Cell = G.WorldToCell(Position);
+    if (!G.IsValid2D(Cell.X, Cell.Y)) return FVector::ZeroVector;
+    
+    int32 CI = G.ColIdx(Cell.X, Cell.Y);
+    uint8 Dir = FF->Directions[CI];
+    
+    if (Dir == 8) return FVector::ZeroVector;     // deja sur la cible
+    if (Dir == 255) return FVector::ZeroVector;   // inaccessible -> fallback direct dans l'ennemi
+    
+    static const float FDX[] = {-1.f, 0.f, 1.f, -1.f, 1.f, -1.f, 0.f, 1.f};
+    static const float FDY[] = {-1.f, -1.f, -1.f, 0.f, 0.f, 1.f, 1.f, 1.f};
+    
+    return FVector(FDX[Dir], FDY[Dir], 0.0f).GetSafeNormal();
+}
+
+// Invalider tous les flow fields caches (quand terrain ou batiments changent)
+void ATDCreatureSpawner::InvalidateAllFlowFields()
+{
+    int32 Count = GroundFlowFields.Num();
+    GroundFlowFields.Empty();
+    if (Count > 0)
+    {
+        UE_LOG(LogTemp, Log, TEXT("FlowField: %d flow fields invalides"), Count);
+    }
+}
+
 // === Refresh quand un batiment est detruit ===
 void ATDCreatureSpawner::RefreshTerrainAroundBuilding(const FVector& BuildingLocation)
 {
     // Marquer la grille comme dirty pour rebuild a la prochaine vague
     bGridDirty = true;
+    
+    // Invalider les flow fields (seront reconstruits lazily)
+    InvalidateAllFlowFields();
     
     if (!bTerrainMapReady) return;
     int32 Idx = FindNearestBaseGrid(BuildingLocation);
