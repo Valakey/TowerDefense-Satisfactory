@@ -4,6 +4,7 @@
 #include "Components/StaticMeshComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "Materials/MaterialInstanceDynamic.h"
+#include "TDLaserFence.h"
 #include "EngineUtils.h"
 #include "UObject/ConstructorHelpers.h"
 
@@ -426,6 +427,9 @@ void ATDEnemyFlying::Tick(float DeltaTime)
         bool bIsTDBuilding = OvClass.StartsWith(TEXT("TD")) && !OvClass.StartsWith(TEXT("TDEnemy")) && !OvClass.StartsWith(TEXT("TDCreature")) && !OvClass.StartsWith(TEXT("TDWorld")) && !OvClass.StartsWith(TEXT("TDDropship"));
         if (!OvClass.StartsWith(TEXT("Build_")) && !bIsTDBuilding) continue;
 
+        // Ignorer les pylones laser fence (cibles uniquement quand bloque)
+        if (OvClass.Contains(TEXT("LaserFence"))) continue;
+
         // Ignorer les batiments deja detruits
         if (SpawnerPtr && SpawnerPtr->IsBuildingDestroyed(OvActor)) continue;
 
@@ -490,7 +494,36 @@ void ATDEnemyFlying::Tick(float DeltaTime)
             if (BlockingActor && IsValid(BlockingActor) && Dist < BestBMDist)
             {
                 FString BlockerClass = BlockingActor->GetClass()->GetName();
-                if (BlockerClass.StartsWith(TEXT("Build_")))
+                // Si bloque par une fence -> chercher breche d'abord, sinon cibler pylone
+                if (BlockerClass.Contains(TEXT("LaserFence")))
+                {
+                    // 1) Breche existante? -> ne pas attaquer le pylone, voler vers la breche
+                    FVector BreachLoc = ATDLaserFence::FindNearestBreach(MyLoc, 5000.0f);
+                    if (!BreachLoc.IsZero())
+                    {
+                        // Breche trouvee: skip, le flying ira naturellement contourner
+                        // (pas de BestBlockingWall = pas d'attaque pylone)
+                    }
+                    else
+                    {
+                        // 2) Pas de breche -> cibler le pylone le plus proche
+                        ATDLaserFence* NearestPylon = nullptr;
+                        float BestPD = MAX_FLT;
+                        for (ATDLaserFence* P : ATDLaserFence::AllPylons)
+                        {
+                            if (!P || !IsValid(P) || !P->bHasPower) continue;
+                            float PD = FVector::Dist(MyLoc, P->GetActorLocation());
+                            if (PD < BestPD) { BestPD = PD; NearestPylon = P; }
+                        }
+                        if (NearestPylon)
+                        {
+                            BestBMDist = Dist;
+                            BestBlockedMachine = OvActor;
+                            BestBlockingWall = NearestPylon;
+                        }
+                    }
+                }
+                else if (BlockerClass.StartsWith(TEXT("Build_")))
                 {
                     BestBMDist = Dist;
                     BestBlockedMachine = OvActor;
@@ -605,6 +638,9 @@ void ATDEnemyFlying::Tick(float DeltaTime)
 
                 bool bIsTDBld = ClassName.StartsWith(TEXT("TD")) && !ClassName.StartsWith(TEXT("TDEnemy")) && !ClassName.StartsWith(TEXT("TDCreature")) && !ClassName.StartsWith(TEXT("TDWorld")) && !ClassName.StartsWith(TEXT("TDDropship"));
                 if (!ClassName.StartsWith(TEXT("Build_")) && !bIsTDBld) continue;
+
+                // Ignorer les pylones laser fence
+                if (ClassName.Contains(TEXT("LaserFence"))) continue;
 
                 if (ClassName.Contains(TEXT("Beam")) || ClassName.Contains(TEXT("Stair")))
                     continue;

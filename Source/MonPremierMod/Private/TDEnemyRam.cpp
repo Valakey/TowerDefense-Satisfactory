@@ -1,5 +1,6 @@
 #include "TDEnemyRam.h"
 #include "TDCreatureSpawner.h"
+#include "TDLaserFence.h"
 #include "Components/SphereComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Kismet/GameplayStatics.h"
@@ -347,6 +348,47 @@ void ATDEnemyRam::UpdateRoaming(float DeltaTime)
             UE_LOG(LogTemp, Warning, TEXT("TDEnemyRam %s: Cible -> %s, Approaching"), *GetName(), *TargetBuilding->GetName());
         }
         return;
+    }
+
+    // === FENCE: d'abord chercher une breche, sinon attaquer pylone ===
+    if (!Building && (ATDLaserFence::AllPylons.Num() > 0 || ATDLaserFence::BreachPoints.Num() > 0) && NoAttackTimer > 5.0f)
+    {
+        FVector RamLoc = GetActorLocation();
+
+        // 1) Chercher une breche existante
+        FVector BreachLoc = ATDLaserFence::FindNearestBreach(RamLoc, 5000.0f);
+        if (!BreachLoc.IsZero())
+        {
+            UE_LOG(LogTemp, Warning, TEXT("TDEnemyRam %s: BRECHE trouvee a %s -> contournement!"), *GetName(), *BreachLoc.ToString());
+            // Utiliser la breche comme cible temporaire de mouvement
+            // On va se deplacer vers la breche via flow field en gardant TargetBuilding
+            FVector Dir = (BreachLoc - RamLoc).GetSafeNormal2D();
+            FVector NewLoc = RamLoc + Dir * MoveSpeed * SpeedMultiplier * 0.016f;
+            NewLoc.Z = RamLoc.Z;
+            SetActorLocation(NewLoc);
+            SetActorRotation(Dir.Rotation());
+            NoAttackTimer = 0.0f;
+            return;
+        }
+
+        // 2) Pas de breche -> attaquer le pylone le plus proche
+        ATDLaserFence* NearestPylon = nullptr;
+        float BestPD = 1500.0f;
+        for (ATDLaserFence* P : ATDLaserFence::AllPylons)
+        {
+            if (!P || !IsValid(P) || !P->bHasPower) continue;
+            if (P->Barriers.Num() == 0) continue;
+            float D = FVector::Dist(RamLoc, P->GetActorLocation());
+            if (D < BestPD) { BestPD = D; NearestPylon = P; }
+        }
+        if (NearestPylon)
+        {
+            UE_LOG(LogTemp, Warning, TEXT("TDEnemyRam %s: PAS DE BRECHE! Targeting pylon %s"), *GetName(), *NearestPylon->GetName());
+            TargetBuilding = NearestPylon;
+            CurrentState = ERamState::Approaching;
+            NoAttackTimer = 0.0f;
+            return;
+        }
     }
 
     // Pas de cible proche: utiliser le flow field pour se deplacer vers la cible
@@ -816,6 +858,9 @@ AActor* ATDEnemyRam::FindBuildingInRange()
         // FILTRE STRICT: seulement Build_* et TD* (pas terrain/decorations)
         bool bIsTDBuilding = ClassName.StartsWith(TEXT("TD")) && !ClassName.StartsWith(TEXT("TDEnemy")) && !ClassName.StartsWith(TEXT("TDCreature")) && !ClassName.StartsWith(TEXT("TDWorld")) && !ClassName.StartsWith(TEXT("TDDropship"));
         if (!ClassName.StartsWith(TEXT("Build_")) && !bIsTDBuilding) continue;
+
+        // Ignorer les pylones laser fence (cibles uniquement quand bloque)
+        if (ClassName.Contains(TEXT("LaserFence"))) continue;
 
         // Ignorer poutres et escaliers (non-destructibles)
         if (ClassName.Contains(TEXT("Beam")) || ClassName.Contains(TEXT("Stair")))

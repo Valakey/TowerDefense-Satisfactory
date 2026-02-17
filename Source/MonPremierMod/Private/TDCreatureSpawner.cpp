@@ -1261,6 +1261,12 @@ float ATDCreatureSpawner::GetBuildingMaxHealth(AActor* Building)
         return 5000.0f;
     }
     
+    // Laser Fence pylone (300 PV)
+    if (ClassName.Contains(TEXT("LaserFence")))
+    {
+        return 300.0f;
+    }
+    
     // Default pour autres batiments
     if (ClassName.Contains(TEXT("Build_")))
     {

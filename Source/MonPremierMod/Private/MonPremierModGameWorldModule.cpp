@@ -9,6 +9,7 @@
 #include "TDShockwaveTurretPlacer.h"
 #include "TDDronePlatformPlacer.h"
 #include "TDShieldGeneratorPlacer.h"
+#include "TDLaserFencePlacer.h"
 #include "Registry/ModContentRegistry.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Kismet/GameplayStatics.h"
@@ -55,6 +56,17 @@ UMonPremierModGameWorldModule::UMonPremierModGameWorldModule()
         mSchematics.Add(ShieldSchematicFinder.Class);
         UE_LOG(LogTemp, Warning, TEXT("MonPremierMod: Schematic_TDShieldGenerator charge!"));
     }
+
+    static ConstructorHelpers::FClassFinder<UFGSchematic> FenceSchematicFinder(TEXT("/MonPremierMod/Items/Schematic_TDLaserFence"));
+    if (FenceSchematicFinder.Succeeded())
+    {
+        mSchematics.Add(FenceSchematicFinder.Class);
+        UE_LOG(LogTemp, Warning, TEXT("MonPremierMod: Schematic_TDLaserFence charge!"));
+    }
+    else
+    {
+        UE_LOG(LogTemp, Error, TEXT("MonPremierMod: ECHEC FClassFinder Schematic_TDLaserFence! Tentative LoadClass..."));
+    }
 }
 
 void UMonPremierModGameWorldModule::DispatchLifecycleEvent(ELifecyclePhase Phase)
@@ -64,7 +76,27 @@ void UMonPremierModGameWorldModule::DispatchLifecycleEvent(ELifecyclePhase Phase
     if (Phase == ELifecyclePhase::CONSTRUCTION)
     {
         UE_LOG(LogTemp, Warning, TEXT("MonPremierMod: GameWorldModule CONSTRUCTION - %d schematics"), mSchematics.Num());
-        
+
+        // Fallback LoadClass pour Schematic_TDLaserFence si FClassFinder a echoue
+        bool bFenceAlreadyRegistered = false;
+        for (auto& S : mSchematics)
+        {
+            if (S && S->GetName().Contains(TEXT("LaserFence"))) { bFenceAlreadyRegistered = true; break; }
+        }
+        if (!bFenceAlreadyRegistered)
+        {
+            UClass* FenceSchematicClass = LoadClass<UFGSchematic>(nullptr, TEXT("/MonPremierMod/Items/Schematic_TDLaserFence.Schematic_TDLaserFence_C"));
+            if (FenceSchematicClass)
+            {
+                mSchematics.Add(TSubclassOf<UFGSchematic>(FenceSchematicClass));
+                UE_LOG(LogTemp, Warning, TEXT("MonPremierMod: Schematic_TDLaserFence charge via LoadClass FALLBACK!"));
+            }
+            else
+            {
+                UE_LOG(LogTemp, Error, TEXT("MonPremierMod: ECHEC TOTAL chargement Schematic_TDLaserFence!"));
+            }
+        }
+
         // Forcer mEquipmentClass sur Desc_TDTurret car l'editeur ne peut pas voir la classe C++
         UClass* DescClass = LoadClass<UFGItemDescriptor>(nullptr, TEXT("/MonPremierMod/Items/Desc_TDTurret.Desc_TDTurret_C"));
         if (DescClass)
@@ -133,6 +165,18 @@ void UMonPremierModGameWorldModule::DispatchLifecycleEvent(ELifecyclePhase Phase
             }
         }
 
+        // Forcer mEquipmentClass sur Desc_TDLaserFence
+        UClass* FenceDescClass = LoadClass<UFGItemDescriptor>(nullptr, TEXT("/MonPremierMod/Items/Desc_TDLaserFence.Desc_TDLaserFence_C"));
+        if (FenceDescClass)
+        {
+            UFGEquipmentDescriptor* FenceDescCDO = Cast<UFGEquipmentDescriptor>(FenceDescClass->GetDefaultObject());
+            if (FenceDescCDO)
+            {
+                FenceDescCDO->mEquipmentClass = ATDLaserFencePlacer::StaticClass();
+                UE_LOG(LogTemp, Warning, TEXT("MonPremierMod: mEquipmentClass force sur Desc_TDLaserFence -> TDLaserFencePlacer"));
+            }
+        }
+
         // === Forcer mConveyorMesh sur tous les descripteurs pour remplacer le cube blanc ===
         auto SetConveyorMesh = [](const TCHAR* DescPath, const TCHAR* MeshPath)
         {
@@ -158,6 +202,7 @@ void UMonPremierModGameWorldModule::DispatchLifecycleEvent(ELifecyclePhase Phase
         SetConveyorMesh(TEXT("/MonPremierMod/Items/Desc_TDDronePlatform.Desc_TDDronePlatform_C"), CrateMesh);
         SetConveyorMesh(TEXT("/MonPremierMod/Items/Desc_TDDrone.Desc_TDDrone_C"), CrateMesh);
         SetConveyorMesh(TEXT("/MonPremierMod/Items/Desc_TDShieldGenerator.Desc_TDShieldGenerator_C"), CrateMesh);
+        SetConveyorMesh(TEXT("/MonPremierMod/Items/Desc_TDLaserFence.Desc_TDLaserFence_C"), CrateMesh);
     }
     
     // SML base class auto-registers mSchematics during CONSTRUCTION via Super::DispatchLifecycleEvent

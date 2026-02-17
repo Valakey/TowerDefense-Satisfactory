@@ -1,5 +1,6 @@
 #include "TDEnemy.h"
 #include "TDCreatureSpawner.h"
+#include "TDLaserFence.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
@@ -445,6 +446,54 @@ void ATDEnemy::CheckIfStuck(float DeltaTime)
                 float DistToTarget = TargetBuilding ? FVector::Dist(MyPos, TargetBuilding->GetActorLocation()) : 99999.f;
                 bool bAtLastWP = (CurrentWaypointIndex >= Waypoints.Num());
                 
+                // === FENCE: d'abord chercher une breche existante, sinon attaquer un pylone ===
+                if (ATDLaserFence::AllPylons.Num() > 0 || ATDLaserFence::BreachPoints.Num() > 0)
+                {
+                    // 1) Chercher une breche existante (pylone detruit = passage libre)
+                    FVector BreachLoc = ATDLaserFence::FindNearestBreach(MyPos, 5000.0f);
+                    if (!BreachLoc.IsZero())
+                    {
+                        UE_LOG(LogTemp, Warning, TEXT("[STUCK] %s: BRECHE trouvee a %s (dist=%.0f) -> contournement!"),
+                            *GetName(), *BreachLoc.ToString(), FVector::Dist(MyPos, BreachLoc));
+                        // Marcher vers la breche (detour direction)
+                        FVector ToBreachDir = (BreachLoc - MyPos).GetSafeNormal();
+                        ToBreachDir.Z = 0.0f;
+                        DetourDirection = ToBreachDir;
+                        DetourTimer = 3.0f;
+                        ConsecutiveStuckCount = 0;
+                        DetourAttempts = 0;
+                        StuckTimer = 0.0f;
+                        return;
+                    }
+
+                    // 2) Pas de breche -> attaquer le pylone le plus proche
+                    ATDLaserFence* NearestActivePylon = nullptr;
+                    float BestPylonDist = 1200.0f;
+                    for (ATDLaserFence* P : ATDLaserFence::AllPylons)
+                    {
+                        if (!P || !IsValid(P) || !P->bHasPower) continue;
+                        if (P->Barriers.Num() == 0) continue;
+                        float D = FVector::Dist(MyPos, P->GetActorLocation());
+                        if (D < BestPylonDist)
+                        {
+                            BestPylonDist = D;
+                            NearestActivePylon = P;
+                        }
+                    }
+                    if (NearestActivePylon)
+                    {
+                        UE_LOG(LogTemp, Warning, TEXT("[STUCK] %s: PAS DE BRECHE! Targeting pylon %s (dist=%.0f)"),
+                            *GetName(), *NearestActivePylon->GetName(), BestPylonDist);
+                        SetTarget(NearestActivePylon);
+                        Waypoints.Empty();
+                        CurrentWaypointIndex = 0;
+                        ConsecutiveStuckCount = 0;
+                        DetourAttempts = 0;
+                        StuckTimer = 0.0f;
+                        return;
+                    }
+                }
+
                 // === OPTI 0: Cible trop haute -> blacklister immediatement ===
                 // Un ennemi au sol ne peut pas grimper des murs/fondations
                 if (TargetBuilding && IsValid(TargetBuilding))
@@ -879,6 +928,9 @@ void ATDEnemy::FindNearestReachableTarget()
         FString ClassName = Actor->GetClass()->GetName();
         bool bIsTDBuilding = ClassName.StartsWith(TEXT("TD")) && !ClassName.StartsWith(TEXT("TDEnemy")) && !ClassName.StartsWith(TEXT("TDCreature")) && !ClassName.StartsWith(TEXT("TDWorld")) && !ClassName.StartsWith(TEXT("TDDropship"));
         if (!ClassName.StartsWith(TEXT("Build_")) && !bIsTDBuilding) continue;
+        
+        // Ignorer les pylones laser fence (cibles uniquement quand bloque)
+        if (ClassName.Contains(TEXT("LaserFence"))) continue;
         
         // Ignorer detruits
         if (Spawner && Spawner->IsBuildingDestroyed(Actor)) continue;
