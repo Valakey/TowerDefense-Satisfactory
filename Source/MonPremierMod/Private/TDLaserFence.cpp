@@ -49,15 +49,16 @@ ATDLaserFence::ATDLaserFence(const FObjectInitializer& ObjectInitializer)
     PowerConnection->SetRelativeLocation(FVector(0.0f, 0.0f, 0.0f));
     PowerInfo = CreateDefaultSubobject<UFGPowerInfoComponent>(TEXT("PowerInfo"));
 
-    // Material holographique (meme que Shield Dome)
-    static ConstructorHelpers::FObjectFinder<UMaterialInterface> ShieldMatObj(
-        TEXT("/MonPremierMod/Materials/M_ShieldDome.M_ShieldDome"));
-    if (ShieldMatObj.Succeeded()) BarrierMaterial = ShieldMatObj.Object;
+    // Material laser beam (orange/jaune)
+    static ConstructorHelpers::FObjectFinder<UMaterialInterface> LaserMatObj(
+        TEXT("/MonPremierMod/Materials/M_LaserBeam.M_LaserBeam"));
+    if (LaserMatObj.Succeeded()) BarrierMaterial = LaserMatObj.Object;
 
     // Cube mesh pour les barrieres visuelles
     static ConstructorHelpers::FObjectFinder<UStaticMesh> CubeMeshObj(
         TEXT("/Engine/BasicShapes/Cube.Cube"));
     if (CubeMeshObj.Succeeded()) CubeMesh = CubeMeshObj.Object;
+
 }
 
 void ATDLaserFence::BeginPlay()
@@ -234,7 +235,11 @@ void ATDLaserFence::ScanForNearbyPylons()
     {
         if (!Barriers[i].OtherPylon.IsValid())
         {
-            if (Barriers[i].BarrierMesh) Barriers[i].BarrierMesh->DestroyComponent();
+            // Detruire tous les laser beams
+            for (UStaticMeshComponent* Beam : Barriers[i].LaserBeams)
+            {
+                if (Beam) Beam->DestroyComponent();
+            }
             if (Barriers[i].BarrierCollision) Barriers[i].BarrierCollision->DestroyComponent();
             Barriers.RemoveAt(i);
         }
@@ -259,30 +264,55 @@ void ATDLaserFence::CreateBarrierTo(ATDLaserFence* OtherPylon)
     // Offset bas de la barriere: -80u sous le midpoint
     float BaseZ = MidZ - 80.0f;
 
-    // === VISUEL: Cube scale en mur holographique fin ===
-    // Hauteur visuelle = BarrierVisualHeight (hauteur du pylone, ~4m)
-    float VisualCenterZ = BaseZ + BarrierVisualHeight * 0.5f;
-    float ScaleX = Distance / 100.0f;
-    float ScaleY = 0.05f;  // 5u d'epaisseur
-    float ScaleZ = BarrierVisualHeight / 100.0f;
+    // === VISUEL: 4 barres laser suivant la pente entre pylones ===
+    // Hauteurs relatives au pylone (pas au BaseZ)
+    TArray<float> BeamHeights = {0.0f, 75.0f, 150.0f, 225.0f};  // 4 barres espacees, demarrage au sol
+    TArray<UStaticMeshComponent*> LaserBeamMeshes;
 
-    UStaticMeshComponent* Mesh = NewObject<UStaticMeshComponent>(this);
-    Mesh->SetStaticMesh(CubeMesh);
-    Mesh->SetMaterial(0, BarrierMaterial);
-    Mesh->SetWorldLocation(FVector(MidPoint2D.X, MidPoint2D.Y, VisualCenterZ));
-    Mesh->SetWorldRotation(BarrierRot);
-    Mesh->SetWorldScale3D(FVector(ScaleX, ScaleY, ScaleZ));
-    Mesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-    Mesh->SetCastShadow(false);
-    Mesh->RegisterComponent();
-    Mesh->AttachToComponent(RootComponent, FAttachmentTransformRules::KeepWorldTransform);
+    for (float RelativeHeight : BeamHeights)
+    {
+        // Position des points d'attache sur chaque pylone
+        FVector PointA = MyLoc + FVector(0.0f, 0.0f, RelativeHeight);
+        FVector PointB = OtherLoc + FVector(0.0f, 0.0f, RelativeHeight);
+        
+        // Milieu entre les 2 points d'attache
+        FVector BeamMidpoint = (PointA + PointB) * 0.5f;
+        
+        // Direction du faisceau (avec pitch si pente)
+        FVector BeamDir = (PointB - PointA).GetSafeNormal();
+        FRotator BeamRotation = BeamDir.Rotation();
+        
+        // Distance 3D entre les 2 points d'attache
+        float BeamLength = FVector::Dist(PointA, PointB);
+        float ScaleX = BeamLength / 100.0f;  // Longueur du laser
+        float ScaleY = 0.06f;  // Diametre du faisceau (6u)
+        float ScaleZ = 0.06f;  // Diametre du faisceau
 
-    // === COLLISION: Box invisible qui bloque les ennemis (100m, bloque flying) ===
-    float CollisionCenterZ = BaseZ + BarrierHeight * 0.5f;
+        UStaticMeshComponent* LaserBeam = NewObject<UStaticMeshComponent>(this);
+        LaserBeam->SetStaticMesh(CubeMesh);
+        LaserBeam->SetMaterial(0, BarrierMaterial);
+        LaserBeam->SetWorldLocation(BeamMidpoint);
+        LaserBeam->SetWorldRotation(BeamRotation);
+        LaserBeam->SetWorldScale3D(FVector(ScaleX, ScaleY, ScaleZ));
+        LaserBeam->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+        LaserBeam->SetCastShadow(false);
+        LaserBeam->RegisterComponent();
+        LaserBeam->AttachToComponent(RootComponent, FAttachmentTransformRules::KeepWorldTransform);
+        
+        LaserBeamMeshes.Add(LaserBeam);
+    }
+
+    // === COLLISION: Box invisible qui bloque les ennemis (sol -> ciel, bloque flying) ===
+    // Partir du sol (ou plus bas) jusqu'au ciel pour aucun gap en dessous
+    float GroundZ = FMath::Min(MyLoc.Z, OtherLoc.Z) - 500.0f;  // 5m sous le pylone le plus bas
+    float TopZ = FMath::Max(MyLoc.Z, OtherLoc.Z) + BarrierHeight;  // 100m au-dessus du plus haut
+    float CollisionCenterZ = (GroundZ + TopZ) * 0.5f;
+    float CollisionHeightHalf = (TopZ - GroundZ) * 0.5f;
+    
     UBoxComponent* Box = NewObject<UBoxComponent>(this);
     Box->SetWorldLocation(FVector(MidPoint2D.X, MidPoint2D.Y, CollisionCenterZ));
     Box->SetWorldRotation(BarrierRot);
-    Box->SetBoxExtent(FVector(Distance * 0.5f + 50.0f, 60.0f, BarrierHeight * 0.5f));
+    Box->SetBoxExtent(FVector(Distance * 0.5f + 50.0f, 60.0f, CollisionHeightHalf));
     Box->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
     Box->SetCollisionResponseToAllChannels(ECR_Ignore);
     Box->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
@@ -306,7 +336,7 @@ void ATDLaserFence::CreateBarrierTo(ATDLaserFence* OtherPylon)
     // Enregistrer la connexion
     FBarrierConnection Connection;
     Connection.OtherPylon = OtherPylon;
-    Connection.BarrierMesh = Mesh;
+    Connection.LaserBeams = LaserBeamMeshes;
     Connection.BarrierCollision = Box;
     Barriers.Add(Connection);
 
@@ -320,7 +350,11 @@ void ATDLaserFence::RemoveBarrierTo(ATDLaserFence* OtherPylon)
     {
         if (Barriers[i].OtherPylon.Get() == OtherPylon)
         {
-            if (Barriers[i].BarrierMesh) Barriers[i].BarrierMesh->DestroyComponent();
+            // Detruire tous les laser beams
+            for (UStaticMeshComponent* Beam : Barriers[i].LaserBeams)
+            {
+                if (Beam) Beam->DestroyComponent();
+            }
             if (Barriers[i].BarrierCollision) Barriers[i].BarrierCollision->DestroyComponent();
             Barriers.RemoveAt(i);
         }
@@ -331,7 +365,11 @@ void ATDLaserFence::RemoveAllBarriers()
 {
     for (FBarrierConnection& B : Barriers)
     {
-        if (B.BarrierMesh) B.BarrierMesh->DestroyComponent();
+        // Detruire tous les laser beams
+        for (UStaticMeshComponent* Beam : B.LaserBeams)
+        {
+            if (Beam) Beam->DestroyComponent();
+        }
         if (B.BarrierCollision) B.BarrierCollision->DestroyComponent();
     }
     Barriers.Empty();
@@ -347,9 +385,13 @@ void ATDLaserFence::UpdateBarrierState()
         bool bOtherHasPower = B.OtherPylon.IsValid() && B.OtherPylon->bHasPower;
         bool bBarrierActive = bActive && bOtherHasPower;
 
-        if (B.BarrierMesh)
+        // Afficher/masquer tous les laser beams
+        for (UStaticMeshComponent* Beam : B.LaserBeams)
         {
-            B.BarrierMesh->SetVisibility(bBarrierActive);
+            if (Beam)
+            {
+                Beam->SetVisibility(bBarrierActive);
+            }
         }
         if (B.BarrierCollision)
         {
@@ -385,6 +427,7 @@ void ATDLaserFence::OnBarrierBeginOverlap(UPrimitiveComponent* OverlappedComp, A
 void ATDLaserFence::TakeDamageCustom(float DamageAmount)
 {
     Health -= DamageAmount;
+    
     if (Health <= 0.0f)
     {
         Die();

@@ -18,8 +18,9 @@ struct FBarrierConnection
     UPROPERTY()
     TWeakObjectPtr<ATDLaserFence> OtherPylon;
 
+    // Plusieurs barres laser visuelles (au lieu d'un seul mur)
     UPROPERTY()
-    UStaticMeshComponent* BarrierMesh = nullptr;
+    TArray<UStaticMeshComponent*> LaserBeams;
 
     UPROPERTY()
     UBoxComponent* BarrierCollision = nullptr;

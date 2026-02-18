@@ -156,6 +156,18 @@ int32 ATDDronePlatform::TakeAmmo(int32 AmountRequested)
     return AmountToTake;
 }
 
+void ATDDronePlatform::TakeDamageCustom(float DamageAmount)
+{
+    Health -= DamageAmount;
+
+    if (Health <= 0.0f)
+    {
+        Health = 0.0f;
+        UE_LOG(LogTemp, Warning, TEXT("TDDronePlatform DESTROYED!"));
+        Destroy();
+    }
+}
+
 bool ATDDronePlatform::HasAmmo() const
 {
     if (!PlatformInventory) return false;

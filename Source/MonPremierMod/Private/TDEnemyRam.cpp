@@ -115,18 +115,32 @@ void ATDEnemyRam::BeginPlay()
 
     OriginalMoveSpeed = MoveSpeed;
     
-    // Ground trace au spawn pour coller au sol immediatement
+    // Ground trace au spawn pour coller au sol immediatement (ignorer batiments)
     FVector SpawnLoc = GetActorLocation();
-    FHitResult GroundHit;
+    TArray<FHitResult> SpawnHits;
     FCollisionQueryParams TraceParams;
     TraceParams.AddIgnoredActor(this);
-    if (GetWorld()->LineTraceSingleByChannel(GroundHit, SpawnLoc + FVector(0,0,500), SpawnLoc - FVector(0,0,5000), ECC_WorldStatic, TraceParams))
+    bool bFoundGround = false;
+    if (GetWorld()->LineTraceMultiByChannel(SpawnHits, SpawnLoc + FVector(0,0,500), SpawnLoc - FVector(0,0,5000), ECC_WorldStatic, TraceParams))
     {
-        BaseHeight = GroundHit.ImpactPoint.Z + 50.0f;
-        SpawnLoc.Z = BaseHeight;
-        SetActorLocation(SpawnLoc);
+        for (const FHitResult& Hit : SpawnHits)
+        {
+            AActor* HitActor = Hit.GetActor();
+            if (HitActor)
+            {
+                FString HitClass = HitActor->GetClass()->GetName();
+                if (HitClass.StartsWith(TEXT("Build_")) || 
+                    (HitClass.StartsWith(TEXT("TD")) && !HitClass.StartsWith(TEXT("TDEnemy"))))
+                    continue;
+            }
+            BaseHeight = Hit.ImpactPoint.Z + 50.0f;
+            SpawnLoc.Z = BaseHeight;
+            SetActorLocation(SpawnLoc);
+            bFoundGround = true;
+            break;
+        }
     }
-    else
+    if (!bFoundGround)
     {
         BaseHeight = SpawnLoc.Z;
     }
@@ -208,17 +222,29 @@ void ATDEnemyRam::Tick(float DeltaTime)
     {
         FVector Loc = GetActorLocation();
         
-        // Ground trace pour trouver le sol
-        // ECC_WorldStatic ignore deja les Pawns (ECC_Pawn) -> pas besoin de boucle AddIgnoredActor
-        FHitResult GroundHit;
+        // Ground trace pour trouver le TERRAIN (ignorer les batiments pour ne pas monter dessus)
+        TArray<FHitResult> GroundHits;
         FVector TraceStart = Loc + FVector(0, 0, 200.0f);
         FVector TraceEnd = Loc - FVector(0, 0, 2000.0f);
         FCollisionQueryParams TraceParams;
         TraceParams.AddIgnoredActor(this);
         
-        if (GetWorld()->LineTraceSingleByChannel(GroundHit, TraceStart, TraceEnd, ECC_WorldStatic, TraceParams))
+        if (GetWorld()->LineTraceMultiByChannel(GroundHits, TraceStart, TraceEnd, ECC_WorldStatic, TraceParams))
         {
-            BaseHeight = GroundHit.ImpactPoint.Z + 50.0f;  // 50u au-dessus du sol (ras du sol)
+            for (const FHitResult& Hit : GroundHits)
+            {
+                AActor* HitActor = Hit.GetActor();
+                if (HitActor)
+                {
+                    FString HitClass = HitActor->GetClass()->GetName();
+                    // Ignorer les batiments (Build_* et TD*) - on veut le terrain uniquement
+                    if (HitClass.StartsWith(TEXT("Build_")) || 
+                        (HitClass.StartsWith(TEXT("TD")) && !HitClass.StartsWith(TEXT("TDEnemy"))))
+                        continue;
+                }
+                BaseHeight = Hit.ImpactPoint.Z + 50.0f;  // 50u au-dessus du sol (ras du sol)
+                break;
+            }
         }
         
         // Petit bob subtil (5u seulement)
@@ -597,15 +623,27 @@ void ATDEnemyRam::UpdateCharging(float DeltaTime)
     // Avancer dans la direction de charge (coller au sol pendant la charge)
     FVector NewLoc = MyLoc + ChargeDirection * ActualChargeSpeed * DeltaTime;
     
-    // Ground trace pendant la charge aussi (ignorer ennemis)
-    FHitResult ChargeGroundHit;
+    // Ground trace pendant la charge aussi (ignorer batiments pour rester au sol)
+    TArray<FHitResult> ChargeGroundHits;
     FVector CTraceStart = NewLoc + FVector(0, 0, 200.0f);
     FVector CTraceEnd = NewLoc - FVector(0, 0, 2000.0f);
     FCollisionQueryParams CTraceParams;
     CTraceParams.AddIgnoredActor(this);
-    if (GetWorld()->LineTraceSingleByChannel(ChargeGroundHit, CTraceStart, CTraceEnd, ECC_WorldStatic, CTraceParams))
+    if (GetWorld()->LineTraceMultiByChannel(ChargeGroundHits, CTraceStart, CTraceEnd, ECC_WorldStatic, CTraceParams))
     {
-        BaseHeight = ChargeGroundHit.ImpactPoint.Z + 50.0f;
+        for (const FHitResult& Hit : ChargeGroundHits)
+        {
+            AActor* HitActor = Hit.GetActor();
+            if (HitActor)
+            {
+                FString HitClass = HitActor->GetClass()->GetName();
+                if (HitClass.StartsWith(TEXT("Build_")) || 
+                    (HitClass.StartsWith(TEXT("TD")) && !HitClass.StartsWith(TEXT("TDEnemy"))))
+                    continue;
+            }
+            BaseHeight = Hit.ImpactPoint.Z + 50.0f;
+            break;
+        }
     }
     NewLoc.Z = BaseHeight;
     SetActorLocation(NewLoc);

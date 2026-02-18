@@ -102,6 +102,7 @@ ATDShieldGenerator::ATDShieldGenerator(const FObjectInitializer& ObjectInitializ
 
     static ConstructorHelpers::FObjectFinder<USoundBase> BeamSoundObj(TEXT("/MonPremierMod/Audios/Turret/beamElec.beamElec"));
     if (BeamSoundObj.Succeeded()) BeamSound = BeamSoundObj.Object;
+
 }
 
 void ATDShieldGenerator::BeginPlay()
@@ -417,4 +418,16 @@ bool ATDShieldGenerator::IsActorInRange(AActor* Actor) const
 {
     if (!Actor || !IsValid(Actor)) return false;
     return FVector::Dist(GetActorLocation(), Actor->GetActorLocation()) <= ShieldRadius;
+}
+
+void ATDShieldGenerator::TakeDamageCustom(float DamageAmount)
+{
+    Health -= DamageAmount;
+
+    if (Health <= 0.0f)
+    {
+        Health = 0.0f;
+        UE_LOG(LogTemp, Warning, TEXT("TDShieldGenerator DESTROYED!"));
+        Destroy();
+    }
 }

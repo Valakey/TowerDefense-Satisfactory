@@ -71,6 +71,16 @@ public:
     bool IsActorInRange(AActor* Actor) const;
     bool HasPower() const { return bHasPower; }
 
+    // Sante
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Shield")
+    float Health = 500.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Shield")
+    float MaxHealth = 500.0f;
+
+    UFUNCTION(BlueprintCallable, Category = "Shield")
+    void TakeDamageCustom(float DamageAmount);
+
 private:
     static const int32 NUM_RINGS = 10;
     static const float RING_BASE_Z;

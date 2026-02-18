@@ -49,6 +49,16 @@ public:
     bool HasAmmo() const;
     int32 GetAmmoCount() const;
 
+    // Sante
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Platform")
+    float Health = 400.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Platform")
+    float MaxHealth = 400.0f;
+
+    UFUNCTION(BlueprintCallable, Category = "Platform")
+    void TakeDamageCustom(float DamageAmount);
+
 private:
     void SpawnDrone();
     void GrabFromConveyor();
