@@ -1,8 +1,8 @@
 {
 	"FileVersion": 3,
 	"Version": 1,
-	"VersionName": "1.0.2",
-	"SemVersion": "1.0.2",
+	"VersionName": "1.0.3",
+	"SemVersion": "1.0.3",
 	"FriendlyName": "Tower Defense (Alpha)",
 	"Description": "Tower Defense mod for Satisfactory. Defend your factory against waves of hostile creatures with turrets, drones and shields!",
 	"Category": "Modding",
